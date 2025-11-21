@@ -61,7 +61,7 @@ curl -i -X POST \
     "transforms.unwrap.add.fields": "op,source.ts_ms",
     "snapshot.mode": "initial",
     "decimal.handling.mode": "string",
-    "time.precision.mode": "adaptive"
+    "time.precision.mode": "adaptive_time_microseconds"
   }
 }'
 
