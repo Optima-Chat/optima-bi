@@ -11,6 +11,7 @@
 商家用自然语言提问 → Claude Code 智能分析 → bi-cli 获取数据 → 生成洞察和建议
 
 **关键特性**:
+
 - 🤖 **AI 优先**: JSON 格式输出，专为 Claude Code 设计
 - 📊 **双输出模式**: JSON（AI 友好）+ Pretty 模式（彩色表格）
 - 🎨 **Web Dashboard**: 可视化图表，交互式分析，移动端友好
@@ -53,6 +54,7 @@
 ```
 
 **职责分离**:
+
 - **Claude Code**: AI 分析、洞察生成、决策建议（CLI 集成）
 - **Web Dashboard**: 可视化图表、交互式分析、报表导出（Web 界面）
 - **bi-cli**: 数据获取、结构化输出（JSON/Pretty）
@@ -82,6 +84,7 @@ bi-cli auth login
 ### 使用示例
 
 **方式 1: 在 Claude Code 中用自然语言**（推荐）:
+
 ```
 "分析最近7天的销售情况"
 "哪些客户流失了？"
@@ -89,6 +92,7 @@ bi-cli auth login
 ```
 
 **方式 2: 在终端使用 bi-cli**:
+
 ```bash
 # JSON 模式（默认，AI 友好）
 bi-cli sales get --days 7
@@ -107,6 +111,7 @@ bi-cli platform overview --month current
 ```
 
 **方式 3: 使用 Web Dashboard**（可视化）:
+
 ```bash
 # 访问 https://bi.optima.chat
 # 或本地运行:
@@ -125,6 +130,7 @@ npm run dev
 ## 📦 核心功能
 
 ### 商家分析（🏪）
+
 - **销售数据**: GMV、订单量、客单价、增长率
 - **客户分析**: 新客/复购/流失、LTV、复购率
 - **库存管理**: 库存预警、周转率、销量排行
@@ -132,6 +138,7 @@ npm run dev
 - **物流跟踪**: 发货时长、配送时效、异常率
 
 ### 平台分析（🏢 管理员专用）
+
 - **GMV 概览**: 平台总交易额、增长趋势
 - **商家分析**: 活跃商家、流失商家、Top 商家
 - **订阅收入**: MRR、ARR、流失率、转化率
@@ -140,11 +147,13 @@ npm run dev
 ## 📚 文档
 
 **核心文档**:
+
 - **[产品需求 (PRD)](./docs/prd.md)** - 功能需求和用户故事
 - **[技术设计](./docs/tech-design.md)** - 架构设计、性能优化
 - **[开发路线图](./docs/roadmap.md)** - 8-10周（CLI + ClickHouse）/ 11-13周（含 Web）
 
 **深入阅读**:
+
 - **[ADR 索引](./docs/architecture/adr-index.md)** - 8个架构决策记录
   - [ADR-006: ClickHouse + CDC](./docs/architecture/adr-006-clickhouse-olap.md) - OLAP 架构（50-1000x 性能提升）
   - [ADR-007: Web Dashboard](./docs/architecture/adr-007-web-dashboard.md) - 可视化界面（Vercel 部署）
@@ -156,22 +165,23 @@ npm run dev
 
 ## 🛠️ 技术栈
 
-| 组件 | 技术 |
-|------|------|
-| **语言** | TypeScript + Node.js 18+ |
-| **bi-cli** | Commander.js + axios + conf |
-| **bi-backend** | Fastify + Prisma + Redis |
-| **bi-web** | Next.js 14 + shadcn/ui + Recharts + NextAuth.js |
-| **OLAP 数据库** | ClickHouse (列式存储 + 物化视图) |
-| **OLTP 数据库** | PostgreSQL 14+ (commerce-backend) |
-| **实时同步** | Debezium CDC + Kafka |
-| **缓存** | Redis 7+ + NodeCache (多层缓存) |
-| **认证** | OAuth 2.0 Device Flow (CLI) + Web Flow (Dashboard) |
-| **部署** | Docker + Docker Compose / Vercel (bi-web) |
+| 组件            | 技术                                               |
+| --------------- | -------------------------------------------------- |
+| **语言**        | TypeScript + Node.js 18+                           |
+| **bi-cli**      | Commander.js + axios + conf                        |
+| **bi-backend**  | Fastify + Prisma + Redis                           |
+| **bi-web**      | Next.js 14 + shadcn/ui + Recharts + NextAuth.js    |
+| **OLAP 数据库** | ClickHouse (列式存储 + 物化视图)                   |
+| **OLTP 数据库** | PostgreSQL 14+ (commerce-backend)                  |
+| **实时同步**    | Debezium CDC + Kafka                               |
+| **缓存**        | Redis 7+ + NodeCache (多层缓存)                    |
+| **认证**        | OAuth 2.0 Device Flow (CLI) + Web Flow (Dashboard) |
+| **部署**        | Docker + Docker Compose / Vercel (bi-web)          |
 
 ## 💻 开发
 
 ### 环境要求
+
 - Node.js 18+
 - PostgreSQL 14+
 - Redis 7+
@@ -186,28 +196,62 @@ cd optima-bi
 # 安装依赖
 npm install
 
-# 启动服务（Docker Compose）
+# 启动所有服务（Docker Compose）
 docker compose up -d
 
-# bi-cli 开发
-cd packages/bi-cli
-npm run dev
+# 查看服务状态
+docker compose ps
 
-# bi-backend 开发
+# 查看日志
+docker compose logs -f bi-backend
+```
+
+**Docker Compose 包含以下服务**：
+
+- `postgres` (7280) - OLTP 数据源（模拟 commerce-backend）
+- `clickhouse` (7281, 7282) - OLAP 数据库
+- `kafka` (7283, 7284) - 消息队列
+- `zookeeper` (7285) - Kafka 依赖
+- `kafka-ui` (7286) - Kafka 管理界面
+- `debezium` (7287) - CDC 连接器
+- `redis` (7288) - 缓存服务
+- `bi-backend` (3001) - BI 分析 API
+
+**开发调试**：
+
+```bash
+# bi-backend 本地开发（不使用 Docker）
 cd packages/bi-backend
-npm run dev
+npm run build  # 构建 TypeScript
+npm run dev    # 启动开发服务器
+
+# bi-cli 本地开发
+cd packages/bi-cli
+npm run dev -- auth login  # 测试 CLI
+```
+
+**重新构建服务**：
+
+```bash
+# 重新构建 bi-backend
+cd packages/bi-backend
+npm run build  # 先在本地构建
+docker compose up -d bi-backend --build  # 重新构建并启动
 ```
 
 ## 🔐 认证与权限
 
 ### OAuth 认证
+
 使用 **OAuth 2.0 Device Flow** 认证：
+
 1. 运行 `bi-cli auth login`
 2. 浏览器自动打开授权页面
 3. 输入显示的代码完成授权
 4. Token 加密存储到 `~/.optima/bi-cli/config.json`
 
 **多环境支持**:
+
 ```bash
 bi-cli auth login --env production   # 生产环境
 bi-cli auth login --env stage        # 测试环境
@@ -215,6 +259,7 @@ bi-cli auth login --env development  # 开发环境
 ```
 
 ### 数据权限隔离
+
 - **商家用户**：只能查看自己商店的数据（自动过滤 `merchant_id`）
 - **平台管理员**：可以查看所有商家的聚合数据和排行榜
 - **实现方式**：应用层权限过滤（bi-backend 中间件 + Query Builder）

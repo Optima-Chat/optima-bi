@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # PostgreSQL (OLTP 数据源 - 模拟 commerce-backend)
   postgres:
@@ -133,6 +131,45 @@ services:
       - redis_data:/data
     networks:
       - optima-bi
+
+  # BI Backend (分析 API 服务)
+  bi-backend:
+    build:
+      context: .
+      dockerfile: packages/bi-backend/Dockerfile
+    container_name: optima-bi-backend
+    depends_on:
+      - clickhouse
+      - redis
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      # ClickHouse
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_DATABASE: bi
+      CLICKHOUSE_USERNAME: default
+      CLICKHOUSE_PASSWORD: ""
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: redis_password
+      # OAuth
+      OAUTH_AUTH_URL: https://auth.optima.chat
+      OAUTH_CLIENT_ID: bi-cli-aqkutatj
+      # Logging
+      LOG_LEVEL: info
+    ports:
+      - "3001:3001"  # BI Backend API
+    networks:
+      - optima-bi
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
 
 volumes:
   postgres_data:
