@@ -23,20 +23,24 @@ graph TB
     end
 
     subgraph "后端服务层 - 数据查询层"
-        C -->|HTTP/REST| D[bi-backend<br/>Fastify/Express<br/>TypeScript]
+        C -->|HTTP/REST| D[bi-backend<br/>Fastify<br/>TypeScript]
         D1[OAuth 认证] --> D
-        D2[查询服务] --> D
-        D3[聚合计算] --> D
-        D4[缓存服务] --> D
+        D2[ClickHouse 查询服务] --> D
+        D3[多层缓存服务] --> D
+        D -->|查询 OLAP| H[ClickHouse<br/>列式存储<br/>物化视图]
     end
 
-    subgraph "数据源层"
-        D -->|只读 SQL 查询| E[commerce-backend<br/>PostgreSQL]
+    subgraph "数据源层 - OLTP"
+        E[commerce-backend<br/>PostgreSQL<br/>OLTP 数据库]
         E -->|复用模型| E1[Order/OrderItem]
         E -->|复用模型| E2[Product/Variant]
         E -->|复用模型| E3[Merchant]
-        E -->|复用模型| E4[MerchantTransfer]
-        E -->|复用模型| E5[Review/Subscription]
+    end
+
+    subgraph "实时同步层 - CDC"
+        E -->|WAL 日志| I[Debezium CDC<br/>Change Data Capture]
+        I -->|捕获变更| J[Kafka<br/>消息队列<br/>10 分区]
+        J -->|流式传输| H
     end
 
     subgraph "认证层"
@@ -44,7 +48,7 @@ graph TB
     end
 
     subgraph "缓存层"
-        D -.->|查询缓存| G[Redis 7+]
+        D -.->|L1/L2 缓存| G[Redis 7+<br/>+ NodeCache]
     end
 
     style B fill:#f9f,stroke:#333,stroke-width:3px
@@ -52,6 +56,9 @@ graph TB
     style D fill:#bfb,stroke:#333,stroke-width:2px
     style E fill:#fbb,stroke:#333,stroke-width:2px
     style F fill:#ffd,stroke:#333,stroke-width:2px
+    style H fill:#fcf,stroke:#333,stroke-width:3px
+    style I fill:#fda,stroke:#333,stroke-width:2px
+    style J fill:#fda,stroke:#333,stroke-width:2px
 ```
 
 ### 1.2 设计原则
@@ -59,22 +66,25 @@ graph TB
 **职责分离**：
 - **Claude Code**：负责 AI 分析、洞察生成、建议输出
 - **bi-cli**：负责数据获取、结构化输出（TypeScript CLI）
-- **bi-backend**：负责数据查询、聚合计算、缓存（Fastify + TypeScript）
-- **commerce-backend DB**：数据源（只读访问）
+- **bi-backend**：负责数据查询、聚合计算、多层缓存（Fastify + TypeScript）
+- **ClickHouse**：OLAP 数据库，负责高性能分析查询（列式存储 + 物化视图）
+- **Debezium + Kafka**：CDC 实时同步，负责将 PostgreSQL 数据流式传输到 ClickHouse
+- **commerce-backend DB**：OLTP 数据源（PostgreSQL）
 
 **数据流向**：
 ```
-commerce DB → bi-backend → bi-cli → Claude Code → 商家
- (SQL查询)   (聚合计算)   (JSON输出)  (AI分析)    (自然语言)
+PostgreSQL → Debezium CDC → Kafka → ClickHouse → bi-backend → bi-cli → Claude Code → 商家
+  (OLTP)    (变更捕获)   (消息队列) (OLAP)    (查询聚合)  (JSON输出) (AI分析)  (自然语言)
+  < 1 秒延迟                        10-50ms 查询
 ```
 
 **关键设计决策**：
 1. **技术栈选择**：全栈 TypeScript（Node.js），统一前后端技术栈
-2. **直接数据库访问**：bi-backend 直接连接 commerce-backend PostgreSQL（只读），避免 API 调用开销
-3. **数据模型定义**：使用 Prisma/TypeORM 重新定义 TypeScript 数据模型（映射 commerce-backend 表结构）
-4. **无需数据同步**：实时查询源数据库，无需维护聚合表
-5. **OAuth 统一**：使用 user-auth 服务进行统一认证
-6. **缓存优化**：使用 Redis 缓存查询结果，减少数据库负载
+2. **OLAP 分离**：使用 ClickHouse OLAP 数据库进行分析查询，完全隔离 OLTP 数据库（[ADR-006](./architecture/adr-006-clickhouse-olap.md)）
+3. **CDC 实时同步**：使用 Debezium CDC + Kafka 实时同步数据（< 1 秒延迟）
+4. **物化视图预聚合**：ClickHouse 物化视图自动预聚合数据，查询性能 50-1000 倍提升
+5. **多层缓存架构**：L1 内存 + L2 Redis + L3 ClickHouse 物化视图 + L4 ClickHouse 原始表
+6. **OAuth 统一**：使用 user-auth 服务进行统一认证
 
 ## 2. bi-cli 设计
 
@@ -1056,7 +1066,7 @@ bi:merchant_123:customers:30d_all
 
 ### 3.6 查询优化策略与性能架构
 
-> ⚠️ **重要更新**：根据[专家评审](./expert-review.md)（评分 6.7/10），直接在 OLTP 数据库执行复杂分析查询存在严重性能问题。必须实施预聚合表架构。
+> ⚠️ **重要更新**：根据[专家评审](./expert-review.md)（评分 6.7/10），直接在 OLTP 数据库执行复杂分析查询存在严重性能问题。必须实施 **ClickHouse OLAP + CDC 实时同步**架构。
 
 #### 3.6.1 性能问题识别
 
@@ -1079,10 +1089,29 @@ GROUP BY DATE(created_at);
 -- 执行时间: 2-5 秒（全表扫描 + 实时聚合）
 ```
 
-#### 3.6.2 解决方案：预聚合表架构（🔴 P0 - 必须实施）
+#### 3.6.2 解决方案：ClickHouse OLAP + CDC（🔴 P0 - 必须实施）
 
-**架构设计**（详见 [ADR-006: 预聚合表](./architecture/adr-006-materialized-views.md)）：
+**架构设计**（详见 [ADR-006: ClickHouse + CDC](./architecture/adr-006-clickhouse-olap.md)）：
 
+```
+PostgreSQL (OLTP)
+  ↓ WAL (Write-Ahead Log)
+Debezium CDC (Change Data Capture)
+  ↓ 捕获变更
+Kafka Topics (消息队列，10 分区)
+  ↓ 流式传输
+ClickHouse Kafka Engine (消费)
+  ↓ 写入
+ClickHouse Raw Tables (ReplacingMergeTree)
+  ↓ 自动聚合
+ClickHouse Materialized Views (SummingMergeTree)
+  ↓ 查询（< 50ms）
+bi-backend
+```
+
+**数据流延迟**：**< 1 秒**（PostgreSQL → ClickHouse）
+
+**多层查询架构**：
 ```
 查询请求
   ↓
@@ -1090,115 +1119,147 @@ L1: 内存缓存 (1 分钟) ← 极热数据
   ↓ miss
 L2: Redis 缓存 (5 分钟) ← 热数据
   ↓ miss
-L3: 预聚合表 (实时) ← 温数据（查询这一层！）
+L3: ClickHouse 物化视图 (实时) ← 温数据（查询这一层！）
   ↓ miss
-L4: 原始表 (实时) ← 冷数据（fallback）
+L4: ClickHouse 原始表 (实时) ← 冷数据（fallback）
 ```
 
-**预聚合表设计**：
+**ClickHouse 表设计**：
 
-1. **daily_merchant_summary**（每日商家汇总）
+1. **orders 表**（原始订单数据）
    ```sql
-   CREATE TABLE daily_merchant_summary (
-     merchant_id UUID NOT NULL,
-     date DATE NOT NULL,
+   CREATE TABLE orders (
+       id UUID,
+       merchant_id UUID,
+       order_number String,
+       customer_email String,
+       status String,
+       subtotal Decimal(10, 2),
+       amount_total Decimal(10, 2),
+       created_at DateTime,
+       updated_at DateTime,
+       _kafka_offset Int64,
+       _kafka_partition Int16,
+       _kafka_timestamp DateTime
+   )
+   ENGINE = ReplacingMergeTree(updated_at)  -- 自动处理 UPDATE
+   PARTITION BY toYYYYMM(created_at)        -- 按月分区
+   ORDER BY (merchant_id, created_at, id);  -- 排序键
 
-     -- 销售指标
-     total_revenue DECIMAL(10, 2) NOT NULL DEFAULT 0,
-     order_count INT NOT NULL DEFAULT 0,
-     avg_order_value DECIMAL(10, 2) NOT NULL DEFAULT 0,
-
-     -- 客户指标
-     unique_customers INT NOT NULL DEFAULT 0,
-     new_customers INT NOT NULL DEFAULT 0,
-     repeat_customers INT NOT NULL DEFAULT 0,
-
-     -- 商品指标
-     products_sold INT NOT NULL DEFAULT 0,
-     avg_items_per_order DECIMAL(5, 2) NOT NULL DEFAULT 0,
-
-     updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-
-     PRIMARY KEY (merchant_id, date)
-   );
-
-   CREATE INDEX idx_daily_summary_date ON daily_merchant_summary(date);
+   -- 分区裁剪：查询单个月份只扫描一个分区
+   -- 主键索引：merchant_id 快速定位
    ```
 
-2. **weekly_product_summary**（每周商品汇总）
-3. **monthly_customer_summary**（每月客户汇总）
+2. **daily_sales_mv**（日销售物化视图）
+   ```sql
+   CREATE MATERIALIZED VIEW daily_sales_mv
+   ENGINE = SummingMergeTree()
+   PARTITION BY toYYYYMM(date)
+   ORDER BY (merchant_id, date)
+   AS SELECT
+       merchant_id,
+       toDate(created_at) as date,
+       sum(amount_total) as total_revenue,
+       count() as order_count,
+       avg(amount_total) as avg_order_value,
+       uniq(customer_email) as unique_customers,
+       now() as _updated_at
+   FROM orders
+   WHERE status IN ('paid', 'delivered', 'completed')
+   GROUP BY merchant_id, date;
+   ```
 
-完整表结构详见 [ADR-006](./architecture/adr-006-materialized-views.md)。
+3. **hourly_sales_mv**（小时销售物化视图）
+4. **product_stats_mv**（商品销售统计）
+5. **customer_stats_mv**（客户行为统计）
+6. **merchant_overview_mv**（商家概览）
+
+完整表结构详见 [ADR-006](./architecture/adr-006-clickhouse-olap.md)。
 
 **查询示例（优化后）**：
 ```sql
--- ✅ 查询预聚合表（快：50-200ms）
+-- ✅ 查询 ClickHouse 物化视图（快：10-50ms）
 SELECT date, total_revenue, order_count
-FROM daily_merchant_summary
+FROM daily_sales_mv
 WHERE merchant_id = 'xxx'
-  AND date >= CURRENT_DATE - 90;
--- 执行时间: 50-200ms（索引查询 + 预计算数据）
+  AND date >= today() - 90
+ORDER BY date DESC;
+-- 执行时间: 10-50ms（列式存储 + 预聚合 + 分区裁剪）
 ```
 
-**性能提升**：**10-100 倍**（2-5s → 50-200ms）
+**性能提升**：**50-1000 倍**（2-5s → 10-50ms）
 
-#### 3.6.3 ETL 更新策略
+#### 3.6.3 CDC 实时同步策略
 
-**更新频率**：
-- **历史数据**（昨天及以前）：每日凌晨 1 点全量更新
-- **今日数据**：每小时增量更新
+**Debezium CDC 配置**：
+```json
+{
+  "name": "commerce-postgres-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "commerce-db",
+    "database.port": "5432",
+    "database.user": "debezium_user",
+    "database.dbname": "commerce",
+    "database.server.name": "commerce",
+    "table.include.list": "public.orders,public.order_items,public.products",
+    "plugin.name": "pgoutput",
+    "publication.name": "dbz_publication",
+    "slot.name": "debezium_slot"
+  }
+}
+```
 
-**更新脚本**（Cron Job）：
+**Kafka Topics**：
+- `commerce.public.orders` - 订单变更
+- `commerce.public.order_items` - 订单明细变更
+- `commerce.public.products` - 商品变更
+- **分区数**：10（提高并行度）
+- **保留时长**：7 天
+
+**ClickHouse Kafka Engine**：
 ```sql
--- 每小时执行（更新今日数据）
-INSERT INTO daily_merchant_summary (...)
-SELECT
-  merchant_id,
-  CURRENT_DATE as date,
-  SUM(amount_total) as total_revenue,
-  COUNT(*) as order_count,
-  AVG(amount_total) as avg_order_value,
-  COUNT(DISTINCT customer_email) as unique_customers,
-  ...
-FROM orders
-WHERE DATE(created_at) = CURRENT_DATE
-  AND status IN ('paid', 'delivered')
-GROUP BY merchant_id
-ON CONFLICT (merchant_id, date)
-DO UPDATE SET
-  total_revenue = EXCLUDED.total_revenue,
-  order_count = EXCLUDED.order_count,
-  ...
-  updated_at = NOW();
+CREATE TABLE orders_kafka (
+    -- 与 orders 表相同字段 --
+)
+ENGINE = Kafka()
+SETTINGS
+    kafka_broker_list = 'kafka:9092',
+    kafka_topic_list = 'commerce.public.orders',
+    kafka_group_name = 'clickhouse_consumer',
+    kafka_format = 'JSONEachRow',
+    kafka_num_consumers = 4;  -- 并行消费
+
+-- 物化视图：将 Kafka 数据写入 orders 表
+CREATE MATERIALIZED VIEW orders_consumer TO orders AS
+SELECT * FROM orders_kafka;
 ```
 
 **数据一致性**：
-- 历史数据（昨天及以前）：准确
-- 今日数据：延迟最多 1 小时
-- 实时查询：fallback 到原始表
+- **延迟**：< 1 秒（PostgreSQL INSERT/UPDATE → ClickHouse）
+- **保证**：最终一致性（ReplacingMergeTree 自动去重）
+- **顺序**：基于 `updated_at` 字段保证最新版本
 
-#### 3.6.4 数据库索引（P0 - 必须）
+#### 3.6.4 ClickHouse 优化策略
 
 ```sql
--- 1. 订单表索引（最重要）
-CREATE INDEX idx_orders_merchant_created_status
-ON orders(merchant_id, created_at, status)
-WHERE status IN ('paid', 'delivered');
+-- 1. ClickHouse 原始表主键（自动索引）
+-- ORDER BY (merchant_id, created_at, id)
+-- 支持快速查询：WHERE merchant_id = 'xxx' AND created_at >= '2024-01-01'
 
--- 2. 订单明细表索引
-CREATE INDEX idx_order_items_product
-ON order_items(product_id, order_id);
+-- 2. ClickHouse 分区裁剪
+-- PARTITION BY toYYYYMM(created_at)
+-- 查询单月数据只扫描一个分区（10-100x 加速）
 
--- 3. 商品表索引
-CREATE INDEX idx_products_merchant_status
-ON products(merchant_id, status, created_at);
+-- 3. ClickHouse 物化视图自动更新
+-- 新数据写入 orders 表 → 自动触发物化视图更新（< 1 秒）
 
--- 4. 预聚合表索引
-CREATE INDEX idx_daily_summary_merchant_date
-ON daily_merchant_summary(merchant_id, date DESC);
+-- 4. ClickHouse 存储压缩
+-- 列式存储 + LZ4 压缩 → 10:1 压缩比
+-- 1 亿行订单 ≈ 10GB 存储
 ```
 
-完整索引清单详见 [性能优化指南](./performance-optimization.md)。
+完整优化清单详见 [性能优化指南](./performance-optimization.md)。
 
 ### 3.7 多层缓存架构（P0 - 必须）
 
@@ -1280,35 +1341,74 @@ async getSalesDataWithLock(merchantId: string, days: number) {
 #### 3.7.3 查询优先级
 
 ```typescript
+import { createClient } from '@clickhouse/client';
+
+const clickhouse = createClient({
+  host: process.env.CLICKHOUSE_HOST,
+  username: process.env.CLICKHOUSE_USER,
+  password: process.env.CLICKHOUSE_PASSWORD,
+});
+
 async getSalesData(merchantId: string, days: number) {
   // L1/L2 缓存
   const cacheKey = `sales:${merchantId}:${days}`;
   const cached = await this.cacheService.get(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    logger.debug({ cache: 'L1_or_L2_HIT', key: cacheKey });
+    return cached;
+  }
 
-  // L3: 优先查询预聚合表（历史数据）
-  const historicalData = await prisma.dailyMerchantSummary.findMany({
-    where: {
-      merchantId,
-      date: { gte: startDate, lt: todayDate }  // 不包含今天
-    }
+  // L3: 优先查询 ClickHouse 物化视图（预聚合数据）
+  const result = await clickhouse.query({
+    query: `
+      SELECT
+        date,
+        total_revenue,
+        order_count,
+        avg_order_value,
+        unique_customers
+      FROM daily_sales_mv
+      WHERE merchant_id = {merchantId:UUID}
+        AND date >= today() - {days:UInt32}
+      ORDER BY date DESC
+    `,
+    query_params: { merchantId, days },
+    format: 'JSONEachRow',
   });
 
-  // L4: 查询原始表（今日数据 + fallback）
-  const todayData = await prisma.order.aggregate({
-    where: {
-      merchantId,
-      createdAt: { gte: todayDate },
-      status: 'paid'
-    },
-    _sum: { amountTotal: true },
-    _count: true
-  });
+  const data = await result.json();
 
-  // 合并数据
-  const data = { historicalData, todayData };
+  // 缓存 5 分钟
   await this.cacheService.set(cacheKey, data, 300);
+  logger.debug({
+    dataSource: 'CLICKHOUSE_MV',
+    merchantId,
+    days,
+    rowCount: data.length
+  });
+
   return data;
+}
+
+// 如果需要实时数据（今日订单），查询 L4: ClickHouse 原始表
+async getTodaySalesData(merchantId: string) {
+  const result = await clickhouse.query({
+    query: `
+      SELECT
+        sum(amount_total) as total_revenue,
+        count() as order_count,
+        avg(amount_total) as avg_order_value,
+        uniq(customer_email) as unique_customers
+      FROM orders
+      WHERE merchant_id = {merchantId:UUID}
+        AND toDate(created_at) = today()
+        AND status IN ('paid', 'delivered', 'completed')
+    `,
+    query_params: { merchantId },
+    format: 'JSONEachRow',
+  });
+
+  return await result.json();
 }
 ```
 
@@ -1317,10 +1417,13 @@ async getSalesData(merchantId: string, days: number) {
 **关键指标**（详见 [性能优化指南](./performance-optimization.md)）：
 
 | 指标 | 目标 | 警告阈值 | 严重阈值 |
-|------|------|---------|---------| | API 响应时间 (P50) | < 500ms | > 1s | > 2s |
-| API 响应时间 (P99) | < 2s | > 3s | > 5s |
+|------|------|---------|---------|
+| API 响应时间 (P50) | < 100ms | > 200ms | > 500ms |
+| API 响应时间 (P99) | < 500ms | > 1s | > 2s |
 | 缓存命中率 | > 70% | < 50% | < 30% |
-| 数据库查询时间 | < 200ms | > 500ms | > 1s |
+| ClickHouse 查询时间 | < 50ms | > 100ms | > 200ms |
+| CDC 数据延迟 | < 1s | > 3s | > 10s |
+| Kafka 消费延迟 | < 500ms | > 2s | > 5s |
 
 **监控实现**：
 ```typescript
@@ -1341,17 +1444,72 @@ export async function metricsMiddleware(
       statusCode: reply.statusCode,
       duration,
       merchantId: request.user?.merchantId,
+      dataSource: request.dataSource,  // 'CLICKHOUSE_MV' | 'CLICKHOUSE_RAW' | 'CACHE'
+      cacheHit: request.cacheHit,      // 'L1' | 'L2' | null
     });
 
-    // 慢查询告警
-    if (duration > 2000) {
+    // 慢查询告警（ClickHouse 架构下阈值更低）
+    if (duration > 500) {
       logger.warn({
         type: 'slow_query',
         duration,
         url: request.url,
+        dataSource: request.dataSource,
+      });
+    }
+
+    // ClickHouse 查询时间监控
+    if (request.clickhouseDuration > 100) {
+      logger.warn({
+        type: 'slow_clickhouse_query',
+        duration: request.clickhouseDuration,
+        query: request.clickhouseQuery,
       });
     }
   });
+}
+
+// src/services/monitoring.service.ts
+export class MonitoringService {
+  // CDC 延迟监控
+  async monitorCdcLatency() {
+    // 查询 PostgreSQL 最新订单时间
+    const pgLatest = await prisma.order.findFirst({
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true }
+    });
+
+    // 查询 ClickHouse 最新订单时间
+    const chResult = await clickhouse.query({
+      query: `SELECT max(created_at) as latest FROM orders`,
+      format: 'JSONEachRow',
+    });
+    const chLatest = await chResult.json();
+
+    // 计算延迟
+    const latency = pgLatest.createdAt - chLatest[0].latest;
+
+    logger.info({
+      type: 'cdc_latency',
+      latency_ms: latency,
+      pg_latest: pgLatest.createdAt,
+      ch_latest: chLatest[0].latest,
+    });
+
+    // 延迟告警
+    if (latency > 3000) {
+      logger.warn({
+        type: 'cdc_latency_alert',
+        latency_ms: latency,
+      });
+    }
+  }
+
+  // Kafka 消费延迟监控
+  async monitorKafkaLag() {
+    // 使用 Kafka Admin API 查询消费者组延迟
+    // (具体实现取决于 Kafka 客户端库)
+  }
 }
 ```
 

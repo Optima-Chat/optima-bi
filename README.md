@@ -13,24 +13,53 @@
 **关键特性**:
 - 🤖 **AI 优先**: JSON 格式输出，专为 Claude Code 设计
 - 📊 **双输出模式**: JSON（AI 友好）+ Pretty 模式（彩色表格）
-- 🔐 **安全认证**: OAuth 2.0 Device Flow，Token 加密存储
+- 🎨 **Web Dashboard**: 可视化图表，交互式分析，移动端友好
+- 🔐 **安全认证**: OAuth 2.0 Device Flow（CLI）/ Web Flow（Dashboard）
 - 🏪 **商家分析**: 销售、客户、库存、财务、物流全方位数据
 - 🏢 **平台分析**: GMV、商家活跃度、订阅收入（管理员专用）
 
 ## 🏗️ 架构设计
 
 ```
-商家/管理员 → Claude Code → bi-cli → bi-backend → commerce-backend DB
-            (AI 分析)   (TypeScript) (Fastify)   (PostgreSQL 只读)
+┌─────────────────────────────────────────────────────────────┐
+│  用户界面层                                                  │
+│  ┌──────────────────┐    ┌─────────────────────────────┐   │
+│  │ Claude Code      │    │ Web Dashboard (bi-web)      │   │
+│  │ (AI 分析)        │    │ (Next.js 14 + shadcn/ui)   │   │
+│  └────────┬─────────┘    └────────┬────────────────────┘   │
+└───────────┼──────────────────────┼─────────────────────────┘
+            │                       │
+            ↓ 调用 bi-cli           ↓ HTTP/REST
+┌───────────┴──────────────┬────────┴─────────────────────────┐
+│  应用层                  │                                   │
+│  ┌──────────────────┐   │   ┌─────────────────────────┐   │
+│  │ bi-cli           │   │   │ bi-backend              │   │
+│  │ (Commander.js)   ├───┼───→ (Fastify + TypeScript) │   │
+│  └──────────────────┘   │   └────────┬────────────────┘   │
+└──────────────────────────┴────────────┼─────────────────────┘
+                                        │
+                                        ↓ 查询 ClickHouse
+┌────────────────────────────────────────┴─────────────────────┐
+│  数据层                                                       │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │ ClickHouse OLAP (列式存储 + 物化视图)              │    │
+│  └────────────────────┬────────────────────────────────┘    │
+│                       ↑ CDC 同步 (< 1 秒)                    │
+│  ┌────────────────────┴────────────────────────────────┐    │
+│  │ PostgreSQL OLTP (commerce-backend)                  │    │
+│  └─────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 **职责分离**:
-- **Claude Code**: AI 分析、洞察生成、决策建议
+- **Claude Code**: AI 分析、洞察生成、决策建议（CLI 集成）
+- **Web Dashboard**: 可视化图表、交互式分析、报表导出（Web 界面）
 - **bi-cli**: 数据获取、结构化输出（JSON/Pretty）
 - **bi-backend**: 数据查询、聚合计算、多层缓存
-- **commerce-backend DB**: 数据源（只读访问 + 预聚合表）
+- **ClickHouse**: OLAP 数据库（列式存储 + 物化视图）
+- **PostgreSQL**: OLTP 数据源（CDC 实时同步到 ClickHouse）
 
-**性能架构**（10-100倍提升）: L1内存(1min) → L2 Redis(5min) → L3预聚合表 → L4原始表
+**性能架构**（50-1000倍提升）: L1内存(1min) → L2 Redis(5min) → L3 ClickHouse物化视图 → L4 ClickHouse原始表
 
 ## 🚀 快速开始
 
@@ -51,14 +80,14 @@ bi-cli auth login
 
 ### 使用示例
 
-**在 Claude Code 中用自然语言**:
+**方式 1: 在 Claude Code 中用自然语言**（推荐）:
 ```
 "分析最近7天的销售情况"
 "哪些客户流失了？"
 "库存低于 5 的商品有哪些？"
 ```
 
-**或直接在终端使用**:
+**方式 2: 在终端使用 bi-cli**:
 ```bash
 # JSON 模式（默认，AI 友好）
 bi-cli sales get --days 7
@@ -74,6 +103,22 @@ bi-cli inventory get --status low
 
 # 平台分析（管理员）
 bi-cli platform overview --month current
+```
+
+**方式 3: 使用 Web Dashboard**（可视化）:
+```bash
+# 访问 https://bi.optima.chat
+# 或本地运行:
+cd packages/bi-web
+npm run dev
+# 访问 http://localhost:3000
+
+# 功能:
+# - 可视化销售趋势图（折线图、柱状图、饼图）
+# - 交互式客户分析（RFM 模型、留存曲线）
+# - 实时数据大屏（管理员）
+# - 导出 CSV/Excel/PDF 报表
+# - 移动端友好访问
 ```
 
 ## 📦 核心功能
@@ -96,11 +141,13 @@ bi-cli platform overview --month current
 **核心文档**:
 - **[产品需求 (PRD)](./docs/prd.md)** - 功能需求和用户故事
 - **[技术设计](./docs/tech-design.md)** - 架构设计、性能优化
-- **[开发路线图](./docs/roadmap.md)** - 7-10周开发计划
+- **[开发路线图](./docs/roadmap.md)** - 8-10周（CLI + ClickHouse）/ 11-13周（含 Web）
 
 **深入阅读**:
-- **[ADR 索引](./docs/architecture/adr-index.md)** - 6个架构决策记录
-- **[性能优化](./docs/performance-optimization.md)** - 预聚合表、多层缓存
+- **[ADR 索引](./docs/architecture/adr-index.md)** - 7个架构决策记录
+  - [ADR-006: ClickHouse + CDC](./docs/architecture/adr-006-clickhouse-olap.md) - OLAP 架构
+  - [ADR-007: Web Dashboard](./docs/architecture/adr-007-web-dashboard.md) - 可视化界面
+- **[性能优化](./docs/performance-optimization.md)** - ClickHouse、CDC、多层缓存
 - **[专家评审](./docs/expert-review.md)** - 第三方评审（6.7/10）
 - **[研究总结](./docs/research-summary.md)** - 生态研究导航
 - **[API 参考](./docs/api-reference.md)** | **[数据模型](./docs/data-models.md)**
@@ -112,10 +159,13 @@ bi-cli platform overview --month current
 | **语言** | TypeScript + Node.js 18+ |
 | **bi-cli** | Commander.js + axios + conf |
 | **bi-backend** | Fastify + Prisma + Redis |
-| **数据库** | PostgreSQL 14+ (只读 + 预聚合表) |
-| **缓存** | Redis 7+ (多层缓存架构) |
-| **认证** | OAuth 2.0 Device Flow |
-| **部署** | Docker + Docker Compose |
+| **bi-web** | Next.js 14 + shadcn/ui + Recharts + NextAuth.js |
+| **OLAP 数据库** | ClickHouse (列式存储 + 物化视图) |
+| **OLTP 数据库** | PostgreSQL 14+ (commerce-backend) |
+| **实时同步** | Debezium CDC + Kafka |
+| **缓存** | Redis 7+ + NodeCache (多层缓存) |
+| **认证** | OAuth 2.0 Device Flow (CLI) + Web Flow (Dashboard) |
+| **部署** | Docker + Docker Compose / Vercel (bi-web) |
 
 ## 💻 开发
 

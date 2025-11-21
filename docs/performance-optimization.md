@@ -1,8 +1,10 @@
 # 性能优化指南
 
-> 基于专家评审建议的性能优化最佳实践
+> 基于专家评审建议和 ClickHouse OLAP 架构的性能优化最佳实践
 
-**目标**: API 响应时间 P50 < 500ms, P99 < 2s
+**目标**: API 响应时间 P50 < 100ms, P99 < 500ms, CDC 延迟 < 1 秒
+
+**性能提升**: 50-1000 倍（vs 原 PostgreSQL 直接查询）
 
 ---
 
@@ -10,21 +12,22 @@
 
 | 优化项 | 影响 | 优先级 | 工作量 | 状态 |
 |--------|------|--------|--------|------|
-| 预聚合表 | ⭐⭐⭐⭐⭐ | 🔴 P0 | 3-5天 | 必须 |
-| 数据库索引 | ⭐⭐⭐⭐ | 🔴 P0 | 1天 | 必须 |
-| 多层缓存 | ⭐⭐⭐⭐ | 🔴 P0 | 2-3天 | 必须 |
-| 查询优化 | ⭐⭐⭐ | 🟡 P1 | 2天 | 建议 |
-| 连接池优化 | ⭐⭐ | 🟡 P1 | 1天 | 建议 |
+| ClickHouse OLAP 部署 | ⭐⭐⭐⭐⭐ | 🔴 P0 | 2-3天 | 必须 |
+| Debezium CDC + Kafka | ⭐⭐⭐⭐⭐ | 🔴 P0 | 3-4天 | 必须 |
+| ClickHouse 物化视图 | ⭐⭐⭐⭐⭐ | 🔴 P0 | 2-3天 | 必须 |
+| 多层缓存架构 | ⭐⭐⭐⭐ | 🔴 P0 | 1-2天 | 必须 |
+| ClickHouse 查询优化 | ⭐⭐⭐ | 🟡 P1 | 2天 | 建议 |
+| 性能监控和告警 | ⭐⭐⭐ | 🟡 P1 | 1-2天 | 建议 |
 
 ---
 
 ## 🎯 优化策略
 
-### 1. 预聚合表（必须 - P0）
+### 1. ClickHouse OLAP 架构（必须 - P0）
 
-#### 问题
+#### 问题：OLTP/OLAP 混用
 ```sql
--- 当前查询（慢）
+-- ❌ PostgreSQL OLTP 查询（慢：2-5 秒）
 SELECT
   DATE(created_at) as date,
   SUM(amount_total) as revenue,
@@ -34,89 +37,179 @@ WHERE merchant_id = 'xxx'
   AND created_at >= NOW() - INTERVAL '30 days'
 GROUP BY DATE(created_at);
 
--- 执行时间: 2-5 秒
--- 全表扫描 + 实时聚合
+-- 问题:
+-- 1. 全表扫描（百万级订单）
+-- 2. 实时聚合计算
+-- 3. 影响 OLTP 业务
+-- 4. 线性扩展瓶颈
 ```
 
-#### 解决方案
+#### 解决方案：ClickHouse OLAP + CDC
+
+**架构概览**：
+```
+PostgreSQL (OLTP) → Debezium CDC → Kafka → ClickHouse (OLAP) → bi-backend
+                     (变更捕获)    (消息队列)  (物化视图)      (查询)
+                     < 1 秒延迟              10-50ms 查询
+```
+
+**ClickHouse 查询**（快：10-50ms）：
 ```sql
--- 查询预聚合表（快）
-SELECT date, total_revenue, order_count
-FROM daily_merchant_summary
+-- ✅ ClickHouse 物化视图查询
+SELECT date, total_revenue, order_count, avg_order_value
+FROM daily_sales_mv
 WHERE merchant_id = 'xxx'
-  AND date >= CURRENT_DATE - 30;
+  AND date >= today() - 30
+ORDER BY date DESC;
 
--- 执行时间: 50-200 毫秒
--- 索引查询 + 预计算数据
+-- 优势:
+-- 1. 列式存储（只读需要的列）
+-- 2. 预聚合数据（物化视图自动计算）
+-- 3. 分区裁剪（月度分区）
+-- 4. 零 OLTP 影响
+-- 执行时间: 10-50 毫秒
 ```
 
-**性能提升**: 10-100 倍
+**性能提升**: 50-1000 倍
 
-详见: [ADR-006: 预聚合表设计](./architecture/adr-006-materialized-views.md)
+详见: [ADR-006: ClickHouse + CDC 架构](./architecture/adr-006-clickhouse-olap.md)
 
 ---
 
-### 2. 数据库索引优化（必须 - P0）
+### 2. ClickHouse 优化策略（必须 - P0）
 
-#### 必要索引清单
+#### 2.1 选择合适的表引擎
 
 ```sql
--- 1. 订单表索引（最重要）
-CREATE INDEX idx_orders_merchant_created_status
-ON orders(merchant_id, created_at, status)
-WHERE status IN ('paid', 'delivered');
+-- ✅ ReplacingMergeTree: 处理 UPDATE 操作
+CREATE TABLE orders (
+    id UUID,
+    merchant_id UUID,
+    amount_total Decimal(10, 2),
+    created_at DateTime,
+    updated_at DateTime
+)
+ENGINE = ReplacingMergeTree(updated_at)  -- 按 updated_at 去重
+PARTITION BY toYYYYMM(created_at)        -- 按月分区
+ORDER BY (merchant_id, created_at, id);  -- 排序键（主键）
 
-CREATE INDEX idx_orders_merchant_date
-ON orders(merchant_id, DATE(created_at))
-WHERE status IN ('paid', 'delivered');
-
--- 2. 订单明细表索引
-CREATE INDEX idx_order_items_product
-ON order_items(product_id, order_id);
-
--- 3. 商品表索引
-CREATE INDEX idx_products_merchant_status
-ON products(merchant_id, status, created_at);
-
--- 4. 预聚合表索引
-CREATE INDEX idx_daily_summary_merchant_date
-ON daily_merchant_summary(merchant_id, date DESC);
-
-CREATE INDEX idx_daily_summary_date
-ON daily_merchant_summary(date DESC);
+-- ✅ SummingMergeTree: 自动聚合求和
+CREATE MATERIALIZED VIEW daily_sales_mv
+ENGINE = SummingMergeTree()
+PARTITION BY toYYYYMM(date)
+ORDER BY (merchant_id, date)
+AS SELECT
+    merchant_id,
+    toDate(created_at) as date,
+    sum(amount_total) as total_revenue,
+    count() as order_count
+FROM orders
+GROUP BY merchant_id, date;
 ```
 
-#### 索引使用验证
+#### 2.2 分区策略
 
 ```sql
--- 使用 EXPLAIN ANALYZE 验证索引
-EXPLAIN ANALYZE
+-- 按月分区（推荐）
+PARTITION BY toYYYYMM(created_at)
+
+-- 优势:
+-- 1. 分区裁剪：查询 2024-01 只扫描一个分区
+-- 2. 数据管理：删除旧数据只需 DROP PARTITION
+-- 3. 性能提升：10-100x（vs 全表扫描）
+
+-- 示例：删除 2023 年 1 月数据
+ALTER TABLE orders DROP PARTITION '202301';
+```
+
+#### 2.3 排序键（主键）优化
+
+```sql
+-- ✅ 优先级原则：高基数在前，低基数在后
+ORDER BY (merchant_id, created_at, id)
+-- merchant_id: 高基数（1000+ 商家）
+-- created_at: 时间戳（天然顺序）
+-- id: UUID（唯一标识）
+
+-- ❌ 错误示例：低基数字段在前
+ORDER BY (status, merchant_id, created_at)
+-- status 只有 5-10 个值，索引效率低
+
+-- 查询示例（利用排序键）:
 SELECT * FROM orders
 WHERE merchant_id = 'xxx'
-  AND created_at >= NOW() - INTERVAL '7 days';
+  AND created_at >= '2024-01-01'
+-- 执行时间: < 10ms（主键索引）
+```
+
+#### 2.4 压缩优化
+
+```sql
+-- ClickHouse 默认使用 LZ4 压缩
+-- 压缩比: 10:1（vs 原始数据）
+-- 1 亿行订单 ≈ 10GB 存储
+
+-- 查看压缩统计
+SELECT
+    table,
+    formatReadableSize(sum(bytes_on_disk)) as size,
+    formatReadableSize(sum(data_uncompressed_bytes)) as uncompressed,
+    round(sum(data_uncompressed_bytes) / sum(bytes_on_disk), 2) as ratio
+FROM system.parts
+WHERE table = 'orders'
+GROUP BY table;
+```
+
+#### 2.5 查询性能验证
+
+```sql
+-- 使用 EXPLAIN 分析查询
+EXPLAIN
+SELECT * FROM orders
+WHERE merchant_id = 'xxx'
+  AND created_at >= today() - 30;
 
 -- 预期输出:
--- Index Scan using idx_orders_merchant_created_status
--- Execution Time: < 100ms
+-- Expression
+--   Filter (merchant_id = 'xxx')
+--   ReadFromMergeTree (orders)
+--     Prewhere: toYYYYMM(created_at) IN (202401, 202402)  -- 分区裁剪
+--     Where: merchant_id = 'xxx'
+
+-- 查询统计
+SELECT
+    query_duration_ms,
+    read_rows,
+    read_bytes,
+    memory_usage
+FROM system.query_log
+WHERE query LIKE '%daily_sales_mv%'
+ORDER BY event_time DESC
+LIMIT 10;
 ```
 
 ---
 
 ### 3. 多层缓存策略（必须 - P0）
 
-#### 三层缓存架构
+#### 四层缓存架构
 
 ```
 查询请求
   ↓
-L1: 内存缓存 (1 分钟) ← 极热数据
+L1: NodeCache 内存缓存 (1 分钟) ← 极热数据
   ↓ miss
 L2: Redis 缓存 (5 分钟) ← 热数据
   ↓ miss
-L3: 预聚合表 (实时) ← 温数据
+L3: ClickHouse 物化视图 (实时) ← 温数据（10-50ms）
   ↓ miss
-L4: 原始表 (实时) ← 冷数据
+L4: ClickHouse 原始表 (实时) ← 冷数据（50-200ms）
 ```
+
+**查询优先级**：
+1. L1/L2: 缓存命中 → 直接返回（< 10ms）
+2. L3: ClickHouse 物化视图 → 预聚合数据（10-50ms）
+3. L4: ClickHouse 原始表 → 实时聚合（50-200ms）
 
 #### 实现代码
 
@@ -339,12 +432,19 @@ process.on('SIGTERM', async () => {
 
 | 指标 | 目标 | 警告阈值 | 严重阈值 |
 |------|------|---------|---------|
-| API 响应时间 (P50) | < 500ms | > 1s | > 2s |
-| API 响应时间 (P99) | < 2s | > 3s | > 5s |
-| 缓存命中率 | > 70% | < 50% | < 30% |
-| 数据库查询时间 | < 200ms | > 500ms | > 1s |
-| 慢查询数量 | 0 | > 10/小时 | > 50/小时 |
+| **API 层** |
+| API 响应时间 (P50) | < 100ms | > 200ms | > 500ms |
+| API 响应时间 (P99) | < 500ms | > 1s | > 2s |
 | 错误率 | < 0.1% | > 1% | > 5% |
+| **缓存层** |
+| 缓存命中率 (L1+L2) | > 70% | < 50% | < 30% |
+| **ClickHouse 层** |
+| ClickHouse 查询时间 | < 50ms | > 100ms | > 200ms |
+| ClickHouse 慢查询 | 0 | > 5/小时 | > 20/小时 |
+| **CDC 层** |
+| CDC 数据延迟 | < 1s | > 3s | > 10s |
+| Kafka 消费延迟 | < 500ms | > 2s | > 5s |
+| Kafka 消息堆积 | 0 | > 1000 | > 10000 |
 
 ### 监控实现
 
@@ -369,17 +469,60 @@ export async function metricsMiddleware(
       statusCode: reply.statusCode,
       duration,
       merchantId: request.user?.merchantId,
+      dataSource: request.dataSource,  // 'CLICKHOUSE_MV' | 'CLICKHOUSE_RAW'
+      cacheHit: request.cacheHit,      // 'L1' | 'L2' | null
+      clickhouseDuration: request.clickhouseDuration,
     });
 
-    // 慢查询告警
-    if (duration > 2000) {
+    // 慢查询告警（ClickHouse 架构下阈值更低）
+    if (duration > 500) {
       logger.warn({
-        type: 'slow_query',
+        type: 'slow_api_request',
         duration,
         url: request.url,
+        dataSource: request.dataSource,
+      });
+    }
+
+    // ClickHouse 慢查询告警
+    if (request.clickhouseDuration > 100) {
+      logger.warn({
+        type: 'slow_clickhouse_query',
+        duration: request.clickhouseDuration,
+        query: request.clickhouseQuery,
       });
     }
   });
+}
+
+// src/services/monitoring.service.ts
+export class MonitoringService {
+  // CDC 延迟监控
+  async monitorCdcLatency() {
+    const pgLatest = await prisma.order.findFirst({
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true }
+    });
+
+    const chResult = await clickhouse.query({
+      query: `SELECT max(created_at) as latest FROM orders`,
+      format: 'JSONEachRow',
+    });
+    const chLatest = await chResult.json();
+
+    const latency = pgLatest.createdAt - chLatest[0].latest;
+
+    logger.info({
+      type: 'cdc_latency',
+      latency_ms: latency,
+      pg_latest: pgLatest.createdAt,
+      ch_latest: chLatest[0].latest,
+    });
+
+    if (latency > 3000) {
+      logger.warn({ type: 'cdc_latency_alert', latency_ms: latency });
+    }
+  }
 }
 ```
 
@@ -387,18 +530,19 @@ export async function metricsMiddleware(
 
 ## 🧪 性能测试
 
-### 基准测试
+### 基准测试（ClickHouse 架构）
 
 ```bash
 # 使用 Apache Bench 进行基准测试
-ab -n 1000 -c 10 \
+ab -n 1000 -c 50 \
    -H "Authorization: Bearer <token>" \
    https://bi-api.optima.chat/api/v1/sales?days=7
 
-# 预期结果:
-# Requests per second: > 50 req/s
-# Time per request: < 200ms (mean)
-# Time per request: < 2000ms (99th percentile)
+# 预期结果（ClickHouse 架构）:
+# Requests per second: > 100 req/s（vs 原 50 req/s）
+# Time per request (mean): < 100ms（vs 原 200ms）
+# Time per request (50th percentile): < 100ms
+# Time per request (99th percentile): < 500ms（vs 原 2000ms）
 ```
 
 ### 压力测试
@@ -411,10 +555,12 @@ import { check } from 'k6';
 
 export let options = {
   stages: [
-    { duration: '2m', target: 50 },   // 升至 50 并发
-    { duration: '5m', target: 50 },   // 保持 50 并发
     { duration: '2m', target: 100 },  // 升至 100 并发
     { duration: '5m', target: 100 },  // 保持 100 并发
+    { duration: '2m', target: 200 },  // 升至 200 并发
+    { duration: '5m', target: 200 },  // 保持 200 并发
+    { duration: '2m', target: 500 },  // 升至 500 并发（极限测试）
+    { duration: '3m', target: 500 },  // 保持 500 并发
     { duration: '2m', target: 0 },    // 降至 0
   ],
 };
@@ -426,74 +572,150 @@ export default function() {
 
   check(response, {
     'status is 200': (r) => r.status === 200,
-    'response time < 2s': (r) => r.timings.duration < 2000,
+    'response time < 500ms': (r) => r.timings.duration < 500,  // ClickHouse 目标
+    'response time < 1s': (r) => r.timings.duration < 1000,
   });
 }
 EOF
+
+# 预期结果:
+# ✅ 100 并发: P95 < 200ms
+# ✅ 200 并发: P95 < 300ms
+# ✅ 500 并发: P95 < 500ms
 ```
 
-### 数据规模测试
+### CDC 延迟测试
+
+```bash
+# 测试 PostgreSQL → ClickHouse CDC 延迟
+# 1. 在 PostgreSQL 插入订单
+psql -c "INSERT INTO orders (...) VALUES (...);" -c "SELECT now();"
+
+# 2. 等待 1 秒
+sleep 1
+
+# 3. 在 ClickHouse 查询订单
+clickhouse-client --query "SELECT * FROM orders WHERE id = 'xxx';" --query "SELECT now();"
+
+# 预期结果:
+# ✅ CDC 延迟 < 1 秒
+# ✅ 订单数据已同步到 ClickHouse
+```
+
+### 数据规模测试（ClickHouse）
 
 ```sql
--- 创建测试数据（100 万订单）
-INSERT INTO orders (...)
-SELECT
-  gen_random_uuid(),
-  'merchant_test',
-  'ORD-' || generate_series,
-  ...
-FROM generate_series(1, 1000000);
+-- ClickHouse 数据规模测试
+-- 导入 1000 万历史订单到 ClickHouse
 
--- 测试查询性能
-EXPLAIN ANALYZE
-SELECT * FROM daily_merchant_summary
+-- 1. 测试 ClickHouse 物化视图查询（90 天销售）
+SELECT * FROM daily_sales_mv
 WHERE merchant_id = 'merchant_test'
-  AND date >= CURRENT_DATE - 90;
+  AND date >= today() - 90
+ORDER BY date DESC;
 
--- 预期: < 200ms
+-- 预期: < 50ms（vs PostgreSQL 2-5s）
+-- 性能提升: 40-100x
+
+-- 2. 测试 ClickHouse 原始表查询（7 天销售）
+SELECT
+    toDate(created_at) as date,
+    sum(amount_total) as revenue,
+    count() as orders
+FROM orders
+WHERE merchant_id = 'merchant_test'
+  AND created_at >= today() - 7
+  AND status IN ('paid', 'delivered')
+GROUP BY date
+ORDER BY date DESC;
+
+-- 预期: < 100ms（vs PostgreSQL 2-5s）
+-- 性能提升: 20-50x
+
+-- 3. 测试商品 Top 10 查询
+SELECT
+    product_id,
+    sum(quantity) as total_quantity,
+    sum(amount) as total_revenue
+FROM order_items
+WHERE merchant_id = 'merchant_test'
+  AND created_at >= today() - 30
+GROUP BY product_id
+ORDER BY total_revenue DESC
+LIMIT 10;
+
+-- 预期: < 50ms（vs PostgreSQL 3-8s）
+-- 性能提升: 60-160x
 ```
 
 ---
 
 ## ✅ 性能优化检查清单
 
-### MVP 阶段（必须完成）
+### Phase 1: ClickHouse + CDC 部署（必须完成 - P0）
 
-- [ ] **创建预聚合表**
-  - [ ] daily_merchant_summary
-  - [ ] weekly_product_summary
-  - [ ] monthly_customer_summary
-  - [ ] ETL 脚本和 Cron Job
+- [ ] **ClickHouse 部署**
+  - [ ] ClickHouse 单节点部署（Docker Compose）
+  - [ ] 创建 orders 表（ReplacingMergeTree）
+  - [ ] 创建 order_items 表（ReplacingMergeTree）
+  - [ ] 创建 products 表（ReplacingMergeTree）
+  - [ ] 配置分区策略（按月 PARTITION BY toYYYYMM）
 
-- [ ] **添加数据库索引**
-  - [ ] orders 表索引
-  - [ ] order_items 表索引
-  - [ ] products 表索引
-  - [ ] 预聚合表索引
+- [ ] **ClickHouse 物化视图**
+  - [ ] daily_sales_mv（SummingMergeTree）
+  - [ ] hourly_sales_mv（SummingMergeTree）
+  - [ ] product_stats_mv（SummingMergeTree）
+  - [ ] customer_stats_mv（SummingMergeTree）
+  - [ ] merchant_overview_mv（SummingMergeTree）
 
-- [ ] **实现多层缓存**
-  - [ ] L1 内存缓存（NodeCache）
-  - [ ] L2 Redis 缓存
+- [ ] **Debezium CDC + Kafka**
+  - [ ] Kafka + Zookeeper 部署
+  - [ ] Debezium Connect 部署
+  - [ ] PostgreSQL Logical Replication 配置
+  - [ ] 创建 Publication（dbz_publication）
+  - [ ] 配置 Debezium Connector
+  - [ ] 验证 CDC 流程（< 1 秒延迟）
+
+- [ ] **ClickHouse Kafka Engine**
+  - [ ] 创建 orders_kafka 表
+  - [ ] 创建 orders_consumer 物化视图
+  - [ ] 创建其他 Kafka 消费者表
+  - [ ] 验证消息消费
+
+- [ ] **bi-backend 集成 ClickHouse**
+  - [ ] 安装 @clickhouse/client
+  - [ ] 创建 ClickHouse 服务层
+  - [ ] 重构查询服务（查询物化视图）
+  - [ ] 集成多层缓存
+
+- [ ] **多层缓存架构**
+  - [ ] L1 内存缓存（NodeCache，1 分钟）
+  - [ ] L2 Redis 缓存（5 分钟）
+  - [ ] L3 ClickHouse 物化视图
+  - [ ] L4 ClickHouse 原始表
   - [ ] 分布式锁（防击穿）
-  - [ ] 缓存预热
 
 - [ ] **性能测试**
-  - [ ] 基准测试（AB）
-  - [ ] 压力测试（k6）
-  - [ ] 数据规模测试（百万级）
-  - [ ] 性能报告
+  - [ ] 基准测试（P50 < 100ms, P99 < 500ms）
+  - [ ] 压力测试（500 并发）
+  - [ ] CDC 延迟测试（< 1 秒）
+  - [ ] 数据规模测试（千万级订单）
+  - [ ] 性能报告（50-1000x 提升验证）
 
-### Phase 2（建议完成）
+### Phase 2: 监控和优化（建议完成 - P1）
 
-- [ ] **查询优化**
-  - [ ] SQL 慢查询分析
-  - [ ] EXPLAIN ANALYZE 所有查询
-  - [ ] 批量查询替代 N+1
-  - [ ] 避免 SELECT *
+- [ ] **ClickHouse 查询优化**
+  - [ ] 使用 EXPLAIN 分析所有查询
+  - [ ] 优化排序键（ORDER BY）
+  - [ ] 优化分区策略
+  - [ ] 查看压缩统计
 
 - [ ] **监控和告警**
-  - [ ] 响应时间监控
-  - [ ] 缓存命中率监控
+  - [ ] API 响应时间监控（< 100ms）
+  - [ ] ClickHouse 查询时间监控（< 50ms）
+  - [ ] CDC 延迟监控（< 1 秒）
+  - [ ] Kafka 消费延迟监控（< 500ms）
+  - [ ] 缓存命中率监控（> 70%）
   - [ ] 慢查询告警
   - [ ] 错误率监控
 
