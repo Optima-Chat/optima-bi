@@ -1,0 +1,29 @@
+{
+  "name": "@optima-chat/bi-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Optima BI Backend API - Fastify server with ClickHouse integration",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "test": "echo \"Error: no test specified\" && exit 0"
+  },
+  "dependencies": {
+    "@clickhouse/client": "^0.2.10",
+    "@fastify/cors": "^8.5.0",
+    "fastify": "^4.25.1",
+    "ioredis": "^5.3.2",
+    "node-cache": "^5.1.2",
+    "pino": "^8.17.2",
+    "pino-pretty": "^10.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.50",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

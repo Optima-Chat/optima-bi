@@ -46,3 +46,6 @@ temp/
 
 # Redis
 dump.rdb
+
+# Docker
+docker-mirror-config.json
