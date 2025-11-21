@@ -1054,61 +1054,306 @@ bi:merchant_123:customers:30d_all
 - 数据更新时主动失效
 - 定时任务批量更新
 
-### 3.6 查询优化策略
+### 3.6 查询优化策略与性能架构
 
-**无需数据同步**：
-- bi-backend 直接查询 commerce-backend 数据库
-- 所有查询都是实时的，无延迟
-- 通过 Redis 缓存提升性能
+> ⚠️ **重要更新**：根据[专家评审](./expert-review.md)（评分 6.7/10），直接在 OLTP 数据库执行复杂分析查询存在严重性能问题。必须实施预聚合表架构。
 
-**优化方式**：
-1. **利用现有索引**：
+#### 3.6.1 性能问题识别
+
+**OLTP/OLAP 混用风险**：
+- ❌ **问题**：直接在 commerce-backend OLTP 数据库执行复杂聚合查询
+- ❌ **影响**：2-5 秒查询时间，影响商家业务（订单、支付）
+- ❌ **扩展性**：商家数增长后压力线性增长
+
+**示例慢查询**：
+```sql
+-- ❌ 当前方案（慢：2-5 秒）
+SELECT
+  DATE(created_at) as date,
+  SUM(amount_total) as revenue,
+  COUNT(*) as orders
+FROM orders
+WHERE merchant_id = 'xxx'
+  AND created_at >= NOW() - INTERVAL '90 days'
+GROUP BY DATE(created_at);
+-- 执行时间: 2-5 秒（全表扫描 + 实时聚合）
+```
+
+#### 3.6.2 解决方案：预聚合表架构（🔴 P0 - 必须实施）
+
+**架构设计**（详见 [ADR-006: 预聚合表](./architecture/adr-006-materialized-views.md)）：
+
+```
+查询请求
+  ↓
+L1: 内存缓存 (1 分钟) ← 极热数据
+  ↓ miss
+L2: Redis 缓存 (5 分钟) ← 热数据
+  ↓ miss
+L3: 预聚合表 (实时) ← 温数据（查询这一层！）
+  ↓ miss
+L4: 原始表 (实时) ← 冷数据（fallback）
+```
+
+**预聚合表设计**：
+
+1. **daily_merchant_summary**（每日商家汇总）
    ```sql
-   -- commerce-backend 已有的索引
-   CREATE INDEX idx_orders_merchant_created ON orders(merchant_id, created_at);
-   CREATE INDEX idx_orders_status ON orders(status);
-   CREATE INDEX idx_order_items_product ON order_items(product_id);
+   CREATE TABLE daily_merchant_summary (
+     merchant_id UUID NOT NULL,
+     date DATE NOT NULL,
+
+     -- 销售指标
+     total_revenue DECIMAL(10, 2) NOT NULL DEFAULT 0,
+     order_count INT NOT NULL DEFAULT 0,
+     avg_order_value DECIMAL(10, 2) NOT NULL DEFAULT 0,
+
+     -- 客户指标
+     unique_customers INT NOT NULL DEFAULT 0,
+     new_customers INT NOT NULL DEFAULT 0,
+     repeat_customers INT NOT NULL DEFAULT 0,
+
+     -- 商品指标
+     products_sold INT NOT NULL DEFAULT 0,
+     avg_items_per_order DECIMAL(5, 2) NOT NULL DEFAULT 0,
+
+     updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+
+     PRIMARY KEY (merchant_id, date)
+   );
+
+   CREATE INDEX idx_daily_summary_date ON daily_merchant_summary(date);
    ```
 
-2. **只读副本**（可选）：
-   - 如果查询压力大，可使用 PostgreSQL 读写分离
-   - bi-backend 连接到只读副本，不影响主库性能
+2. **weekly_product_summary**（每周商品汇总）
+3. **monthly_customer_summary**（每月客户汇总）
 
-3. **物化视图**（Phase 2）：
-   - 对于复杂聚合查询，可创建物化视图
-   - 例如：每日销售汇总、商品销售排行
-   ```sql
-   CREATE MATERIALIZED VIEW daily_sales_summary AS
-   SELECT
-       merchant_id,
-       date_trunc('day', created_at) as date,
-       sum(amount_total) as revenue,
-       count(*) as order_count
-   FROM orders
-   WHERE status = 'paid'
-   GROUP BY merchant_id, date;
+完整表结构详见 [ADR-006](./architecture/adr-006-materialized-views.md)。
 
-   -- 每小时刷新一次
-   REFRESH MATERIALIZED VIEW daily_sales_summary;
-   ```
+**查询示例（优化后）**：
+```sql
+-- ✅ 查询预聚合表（快：50-200ms）
+SELECT date, total_revenue, order_count
+FROM daily_merchant_summary
+WHERE merchant_id = 'xxx'
+  AND date >= CURRENT_DATE - 90;
+-- 执行时间: 50-200ms（索引查询 + 预计算数据）
+```
 
-### 3.7 性能优化
+**性能提升**：**10-100 倍**（2-5s → 50-200ms）
 
-**查询优化**：
-- 使用索引加速查询
-- 数据分区（按月份分区）
-- 只查询必要字段
-- 预聚合常用维度
+#### 3.6.3 ETL 更新策略
 
-**计算优化**：
-- 异步任务处理重计算
-- 分批处理大量数据
-- 使用数据库聚合函数
+**更新频率**：
+- **历史数据**（昨天及以前）：每日凌晨 1 点全量更新
+- **今日数据**：每小时增量更新
 
-**缓存优化**：
-- 缓存穿透保护
-- 缓存预热
-- 智能缓存失效
+**更新脚本**（Cron Job）：
+```sql
+-- 每小时执行（更新今日数据）
+INSERT INTO daily_merchant_summary (...)
+SELECT
+  merchant_id,
+  CURRENT_DATE as date,
+  SUM(amount_total) as total_revenue,
+  COUNT(*) as order_count,
+  AVG(amount_total) as avg_order_value,
+  COUNT(DISTINCT customer_email) as unique_customers,
+  ...
+FROM orders
+WHERE DATE(created_at) = CURRENT_DATE
+  AND status IN ('paid', 'delivered')
+GROUP BY merchant_id
+ON CONFLICT (merchant_id, date)
+DO UPDATE SET
+  total_revenue = EXCLUDED.total_revenue,
+  order_count = EXCLUDED.order_count,
+  ...
+  updated_at = NOW();
+```
+
+**数据一致性**：
+- 历史数据（昨天及以前）：准确
+- 今日数据：延迟最多 1 小时
+- 实时查询：fallback 到原始表
+
+#### 3.6.4 数据库索引（P0 - 必须）
+
+```sql
+-- 1. 订单表索引（最重要）
+CREATE INDEX idx_orders_merchant_created_status
+ON orders(merchant_id, created_at, status)
+WHERE status IN ('paid', 'delivered');
+
+-- 2. 订单明细表索引
+CREATE INDEX idx_order_items_product
+ON order_items(product_id, order_id);
+
+-- 3. 商品表索引
+CREATE INDEX idx_products_merchant_status
+ON products(merchant_id, status, created_at);
+
+-- 4. 预聚合表索引
+CREATE INDEX idx_daily_summary_merchant_date
+ON daily_merchant_summary(merchant_id, date DESC);
+```
+
+完整索引清单详见 [性能优化指南](./performance-optimization.md)。
+
+### 3.7 多层缓存架构（P0 - 必须）
+
+#### 3.7.1 缓存层级
+
+```typescript
+// src/services/cache.service.ts
+import NodeCache from 'node-cache';
+import { Redis } from 'ioredis';
+
+export class CacheService {
+  private memCache: NodeCache;  // L1: 内存缓存
+  private redis: Redis;          // L2: Redis 缓存
+
+  constructor() {
+    this.memCache = new NodeCache({ stdTTL: 60 });  // 1 分钟
+    this.redis = new Redis(process.env.REDIS_URL);
+  }
+
+  async get<T>(key: string): Promise<T | null> {
+    // L1: 内存缓存（极热数据）
+    const memData = this.memCache.get<T>(key);
+    if (memData) {
+      logger.debug({ cache: 'L1_HIT', key });
+      return memData;
+    }
+
+    // L2: Redis 缓存（热数据）
+    const redisData = await this.redis.get(key);
+    if (redisData) {
+      const data = JSON.parse(redisData) as T;
+      this.memCache.set(key, data);  // 回填 L1
+      logger.debug({ cache: 'L2_HIT', key });
+      return data;
+    }
+
+    logger.debug({ cache: 'MISS', key });
+    return null;  // L3/L4: 查询数据库
+  }
+
+  async set<T>(key: string, data: T, ttl: number = 300): Promise<void> {
+    this.memCache.set(key, data);
+    await this.redis.set(key, JSON.stringify(data), 'EX', ttl);
+  }
+}
+```
+
+#### 3.7.2 防止缓存击穿（分布式锁）
+
+```typescript
+async getSalesDataWithLock(merchantId: string, days: number) {
+  const cacheKey = `sales:${merchantId}:${days}`;
+  const lockKey = `lock:${cacheKey}`;
+
+  // 尝试获取缓存
+  let data = await this.cacheService.get(cacheKey);
+  if (data) return data;
+
+  // 获取分布式锁（防止并发查询数据库）
+  const lock = await this.redis.set(lockKey, '1', 'EX', 10, 'NX');
+
+  if (lock) {
+    try {
+      // 获取锁成功，查询数据库
+      data = await this.querySalesFromDB(merchantId, days);
+      await this.cacheService.set(cacheKey, data, 300);
+      return data;
+    } finally {
+      await this.redis.del(lockKey);
+    }
+  } else {
+    // 获取锁失败，等待后重试
+    await sleep(50);
+    return this.getSalesDataWithLock(merchantId, days);
+  }
+}
+```
+
+#### 3.7.3 查询优先级
+
+```typescript
+async getSalesData(merchantId: string, days: number) {
+  // L1/L2 缓存
+  const cacheKey = `sales:${merchantId}:${days}`;
+  const cached = await this.cacheService.get(cacheKey);
+  if (cached) return cached;
+
+  // L3: 优先查询预聚合表（历史数据）
+  const historicalData = await prisma.dailyMerchantSummary.findMany({
+    where: {
+      merchantId,
+      date: { gte: startDate, lt: todayDate }  // 不包含今天
+    }
+  });
+
+  // L4: 查询原始表（今日数据 + fallback）
+  const todayData = await prisma.order.aggregate({
+    where: {
+      merchantId,
+      createdAt: { gte: todayDate },
+      status: 'paid'
+    },
+    _sum: { amountTotal: true },
+    _count: true
+  });
+
+  // 合并数据
+  const data = { historicalData, todayData };
+  await this.cacheService.set(cacheKey, data, 300);
+  return data;
+}
+```
+
+### 3.8 性能监控与告警
+
+**关键指标**（详见 [性能优化指南](./performance-optimization.md)）：
+
+| 指标 | 目标 | 警告阈值 | 严重阈值 |
+|------|------|---------|---------| | API 响应时间 (P50) | < 500ms | > 1s | > 2s |
+| API 响应时间 (P99) | < 2s | > 3s | > 5s |
+| 缓存命中率 | > 70% | < 50% | < 30% |
+| 数据库查询时间 | < 200ms | > 500ms | > 1s |
+
+**监控实现**：
+```typescript
+// src/middleware/metrics.ts
+export async function metricsMiddleware(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
+  const start = Date.now();
+
+  reply.addHook('onSend', async () => {
+    const duration = Date.now() - start;
+
+    logger.info({
+      type: 'api_metrics',
+      method: request.method,
+      url: request.url,
+      statusCode: reply.statusCode,
+      duration,
+      merchantId: request.user?.merchantId,
+    });
+
+    // 慢查询告警
+    if (duration > 2000) {
+      logger.warn({
+        type: 'slow_query',
+        duration,
+        url: request.url,
+      });
+    }
+  });
+}
+```
 
 ## 4. Claude Code 集成
 
