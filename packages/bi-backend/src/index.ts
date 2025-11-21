@@ -1,6 +1,9 @@
+import 'dotenv/config';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { createLogger } from './utils/logger';
+import { testConnection } from './services/clickhouse.service';
+import { salesRoutes } from './routes/sales';
 
 const logger = createLogger('server');
 
@@ -26,15 +29,30 @@ async function start() {
     origin: process.env.CORS_ORIGIN || '*',
   });
 
+  // Test ClickHouse connection
+  const clickhouseOk = await testConnection();
+  if (!clickhouseOk) {
+    logger.warn('ClickHouse connection test failed');
+  } else {
+    logger.info('ClickHouse connection OK');
+  }
+
   // Health check endpoint
   fastify.get('/health', async () => {
-    return { status: 'ok', timestamp: new Date().toISOString() };
+    return {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      clickhouse: clickhouseOk ? 'connected' : 'disconnected',
+    };
   });
 
-  // API routes placeholder
+  // API routes
   fastify.get('/api/v1', async () => {
-    return { message: 'Optima BI API v1' };
+    return { message: 'Optima BI API v1', version: '0.1.0' };
   });
+
+  // Register sales routes
+  await fastify.register(salesRoutes);
 
   // Start server
   const port = Number(process.env.PORT) || 3001;

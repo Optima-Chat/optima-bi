@@ -5,7 +5,7 @@ export const config = {
     corsOrigin: process.env.CORS_ORIGIN || '*',
   },
   clickhouse: {
-    host: process.env.CLICKHOUSE_HOST || 'http://localhost:7281',
+    url: process.env.CLICKHOUSE_URL || 'http://localhost:7281',
     username: process.env.CLICKHOUSE_USER || 'default',
     password: process.env.CLICKHOUSE_PASSWORD || '',
     database: process.env.CLICKHOUSE_DB || 'bi',

@@ -1,16 +1,24 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { version } from '../package.json';
+import { createAuthCommand } from './commands/auth';
+import { createSalesCommand } from './commands/sales';
+import packageJson from '../package.json';
 
 const program = new Command();
 
 program
   .name('bi-cli')
   .description('Optima BI CLI - AI-friendly business intelligence tool')
-  .version(version);
+  .version(packageJson.version);
 
-// Config commands
+// Auth commands
+program.addCommand(createAuthCommand());
+
+// Sales commands
+program.addCommand(createSalesCommand());
+
+// Config commands (placeholder)
 program
   .command('config')
   .description('Manage configuration')
@@ -18,23 +26,7 @@ program
     console.log('Config management coming soon...');
   });
 
-// Auth commands
-program
-  .command('auth')
-  .description('Authentication commands')
-  .action(() => {
-    console.log('Authentication coming soon...');
-  });
-
-// Sales commands
-program
-  .command('sales')
-  .description('Sales analytics')
-  .action(() => {
-    console.log('Sales analytics coming soon...');
-  });
-
-// Customer commands
+// Customer commands (placeholder)
 program
   .command('customer')
   .description('Customer analytics')
@@ -42,7 +34,7 @@ program
     console.log('Customer analytics coming soon...');
   });
 
-// Inventory commands
+// Inventory commands (placeholder)
 program
   .command('inventory')
   .description('Inventory analytics')
@@ -50,7 +42,7 @@ program
     console.log('Inventory analytics coming soon...');
   });
 
-// Product commands
+// Product commands (placeholder)
 program
   .command('product')
   .description('Product analytics')
@@ -58,7 +50,7 @@ program
     console.log('Product analytics coming soon...');
   });
 
-// Platform commands (admin only)
+// Platform commands (admin only - placeholder)
 program
   .command('platform')
   .description('Platform analytics (admin only)')
