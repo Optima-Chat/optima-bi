@@ -38,20 +38,29 @@ export function createAuthCommand(): Command {
     .action(async (options) => {
       const { env } = options;
 
-      // Set backend URL based on environment
+      // Set URLs based on environment
+      const authUrls = {
+        production: 'https://auth.optima.chat',
+        stage: 'https://auth-stage.optima.chat',
+        development: 'http://localhost:4000',
+      };
+
       const backendUrls = {
         production: 'https://bi-api.optima.chat',
         stage: 'https://bi-api-stage.optima.chat',
         development: 'http://localhost:3001',
       };
 
+      const authUrl = authUrls[env as keyof typeof authUrls];
       const backendUrl = backendUrls[env as keyof typeof backendUrls];
-      if (!backendUrl) {
+
+      if (!authUrl || !backendUrl) {
         error(`Invalid environment: ${env}`);
         process.exit(1);
       }
 
       setConfig('environment', env);
+      setConfig('authUrl', authUrl);
       setConfig('backendUrl', backendUrl);
 
       info(`Logging in to ${env} environment...`);
@@ -60,8 +69,8 @@ export function createAuthCommand(): Command {
         // Step 1: Request device code
         const spinner = ora('Requesting device code...').start();
         const deviceCodeRes = await axios.post<DeviceCodeResponse>(
-          `${backendUrl}/api/v1/auth/device/code`,
-          { client_id: 'bi-cli' }
+          `${authUrl}/api/v1/oauth/device/authorize`,
+          { client_id: 'bi-cli-aqkutatj' }
         );
         spinner.succeed('Device code received');
 
@@ -90,10 +99,16 @@ export function createAuthCommand(): Command {
 
           try {
             const tokenRes = await axios.post<TokenResponse>(
-              `${backendUrl}/api/v1/auth/device/token`,
-              {
-                client_id: 'bi-cli',
+              `${authUrl}/api/v1/oauth/device/token`,
+              new URLSearchParams({
+                grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+                client_id: 'bi-cli-aqkutatj',
                 device_code,
+              }),
+              {
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                },
               }
             );
 
@@ -127,7 +142,7 @@ export function createAuthCommand(): Command {
         setConfig('refreshToken', token.refresh_token);
 
         // Step 6: Fetch user info
-        const userInfo = await axios.get<UserInfo>(`${backendUrl}/api/v1/auth/me`, {
+        const userInfo = await axios.get<UserInfo>(`${authUrl}/api/v1/auth/me`, {
           headers: { Authorization: `Bearer ${token.access_token}` },
         });
 
@@ -161,7 +176,7 @@ export function createAuthCommand(): Command {
       }
 
       try {
-        const userInfo = await axios.get<UserInfo>(`${cfg.backendUrl}/api/v1/auth/me`, {
+        const userInfo = await axios.get<UserInfo>(`${cfg.authUrl}/api/v1/auth/me`, {
           headers: { Authorization: `Bearer ${cfg.accessToken}` },
         });
 
