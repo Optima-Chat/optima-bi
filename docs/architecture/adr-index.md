@@ -13,6 +13,7 @@
 | [ADR-005](./adr-005-multi-env.md) | 多环境支持 | ✅ 已采纳 | 2025-01-21 |
 | [ADR-006](./adr-006-clickhouse-olap.md) | ClickHouse + CDC 实时同步 | 🔴 必须采纳 | 2025-01-21 |
 | [ADR-007](./adr-007-web-dashboard.md) | Web 可视化界面（Dashboard） | ✅ 已采纳 | 2025-01-21 |
+| [ADR-008](./adr-008-row-level-security.md) | 数据权限隔离（Row-Level Security） | ✅ 已采纳 | 2025-01-21 |
 
 ## 📖 如何阅读 ADR
 
@@ -28,9 +29,12 @@
 ## 🎯 快速导航
 
 ### 已采纳的关键决策
-- **技术栈**: TypeScript + Fastify + Prisma ([ADR-001](./adr-001-typescript-stack.md))
+- **技术栈**: TypeScript + Fastify + ClickHouse ([ADR-001](./adr-001-typescript-stack.md))
+- **OLAP 架构**: ClickHouse + CDC 实时同步 ([ADR-006](./adr-006-clickhouse-olap.md))
 - **认证方式**: OAuth 2.0 Device Flow ([ADR-003](./adr-003-oauth-device-flow.md))
+- **权限隔离**: 应用层权限过滤 ([ADR-008](./adr-008-row-level-security.md))
 - **输出格式**: JSON 默认 + Pretty 选项 ([ADR-004](./adr-004-json-output.md))
+- **可视化界面**: Web Dashboard (Next.js 14 + Vercel) ([ADR-007](./adr-007-web-dashboard.md))
 
 ### 需要改进的决策
 - **数据访问**: 直接访问 OLTP 数据库存在性能风险 ([ADR-002](./adr-002-direct-db-access.md))
@@ -38,8 +42,11 @@
 
 ### 待讨论的决策
 - ClickHouse 集群化时机（单节点 → 多节点）
-- 数据保留策略（历史数据归档方案）
 - Web Dashboard 移动端 App（PWA vs React Native）
+
+### 已明确不做的功能（MVP 阶段）
+- ❌ 数据保留和归档策略（暂时保留全部数据）
+- ❌ 监控和告警系统（先用基础日志）
 
 ---
 

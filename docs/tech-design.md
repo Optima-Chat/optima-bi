@@ -1736,76 +1736,170 @@ interface CurrentUser {
 
 参见上文 3.2.1 节的 TypeScript authMiddleware 实现。
 
-#### 7.1.4 数据隔离
+#### 7.1.4 数据隔离（Row-Level Security）
+
+**设计方案**：应用层权限过滤（bi-backend 中间件）
+
+详细设计参见：[ADR-008: 数据权限隔离](./architecture/adr-008-row-level-security.md)
+
+##### 统一 Query Builder
+
+```typescript
+// src/utils/queryBuilder.ts
+import { User } from '../types';
+
+export class SecureQueryBuilder {
+  private merchantId?: string;
+  private role: string;
+
+  constructor(user: User) {
+    this.merchantId = user.merchantId;
+    this.role = user.role;
+  }
+
+  /**
+   * 商家查询：自动注入 WHERE merchant_id = ?
+   */
+  buildMerchantQuery(table: string, conditions: string = ''): string {
+    if (!this.merchantId) {
+      throw new Error('merchantId required for merchant query');
+    }
+
+    const whereClause = conditions
+      ? `WHERE merchant_id = '${this.merchantId}' AND (${conditions})`
+      : `WHERE merchant_id = '${this.merchantId}'`;
+
+    return `SELECT * FROM ${table} ${whereClause}`;
+  }
+
+  /**
+   * 管理员查询：验证权限
+   */
+  buildAdminQuery(table: string, conditions: string = ''): string {
+    if (this.role !== 'admin') {
+      throw new Error('Admin role required');
+    }
+
+    return `SELECT * FROM ${table} ${conditions ? 'WHERE ' + conditions : ''}`;
+  }
+}
+```
+
+##### 路由实现（ClickHouse）
+
 ```typescript
 // src/routes/sales.ts
 import { FastifyInstance } from 'fastify';
-import { prisma } from '../db';
+import { clickhouse } from '../db/clickhouse';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/permissions';
+import { SecureQueryBuilder } from '../utils/queryBuilder';
 
 export async function salesRoutes(app: FastifyInstance) {
-  // 商家查询（自动过滤）
-  app.get('/api/v1/sales', {
+  // 商家查询销售数据（自动过滤）
+  app.get('/api/v1/sales/daily', {
     preHandler: authMiddleware
   }, async (request, reply) => {
     const { days = 7 } = request.query as { days?: number };
-    const { merchantId } = request.user;
+    const qb = new SecureQueryBuilder(request.user);
 
-    // 商家只能查看自己的数据
-    const orders = await prisma.order.findMany({
-      where: {
-        merchantId,
-        status: 'paid',
-        createdAt: {
-          gte: new Date(Date.now() - days * 24 * 60 * 60 * 1000)
-        }
-      }
+    // 查询 ClickHouse 物化视图（自动加 WHERE merchant_id）
+    const query = `
+      SELECT
+        date,
+        total_revenue,
+        order_count,
+        avg_order_value,
+        unique_customers
+      FROM daily_sales_mv
+      WHERE merchant_id = {merchantId:UUID}
+        AND date >= today() - {days:UInt32}
+      ORDER BY date DESC
+    `;
+
+    const result = await clickhouse.query({
+      query,
+      query_params: {
+        merchantId: request.user.merchantId,
+        days
+      },
+      format: 'JSONEachRow'
     });
 
-    return { orders };
+    return { data: await result.json() };
   });
 
-  // 平台查询（需要管理员权限）
-  app.get('/api/v1/platform/overview', {
+  // 平台查询 GMV（需要管理员权限）
+  app.get('/api/v1/platform/gmv', {
     preHandler: [authMiddleware, requireAdmin]
   }, async (request, reply) => {
-    // 查询所有商家数据（不过滤 merchantId）
-    const stats = await prisma.order.aggregate({
-      where: { status: 'paid' },
-      _sum: { amountTotal: true },
-      _count: true
+    const qb = new SecureQueryBuilder(request.user);
+    const { days = 30 } = request.query as { days?: number };
+
+    // 管理员查询：不过滤 merchant_id，聚合所有商家
+    const query = `
+      SELECT
+        date,
+        sum(total_revenue) as platform_gmv,
+        sum(order_count) as total_orders,
+        avg(avg_order_value) as avg_order_value
+      FROM daily_sales_mv
+      WHERE date >= today() - {days:UInt32}
+      GROUP BY date
+      ORDER BY date DESC
+    `;
+
+    const result = await clickhouse.query({
+      query,
+      query_params: { days },
+      format: 'JSONEachRow'
     });
 
-    return { stats };
+    return { data: await result.json() };
   });
 
   // 管理员查看指定商家数据
-  app.get('/api/v1/sales/:merchantId?', {
-    preHandler: authMiddleware
+  app.get('/api/v1/sales/merchant/:merchantId', {
+    preHandler: [authMiddleware, requireAdmin]
   }, async (request, reply) => {
-    const { merchantId } = request.params as { merchantId?: string };
-    const currentUser = request.user;
+    const { merchantId } = request.params as { merchantId: string };
+    const { days = 7 } = request.query as { days?: number };
 
-    // 确定目标商家 ID
-    let targetMerchantId: string;
+    // 管理员可以查询任意商家数据
+    const query = `
+      SELECT * FROM daily_sales_mv
+      WHERE merchant_id = {merchantId:UUID}
+        AND date >= today() - {days:UInt32}
+      ORDER BY date DESC
+    `;
 
-    if (merchantId) {
-      // 如果指定了 merchantId，需要管理员权限
-      if (currentUser.role !== UserRole.ADMIN) {
-        return reply.code(403).send({ error: 'Admin role required' });
-      }
-      targetMerchantId = merchantId;
-    } else {
-      // 商家默认查询自己的数据
-      targetMerchantId = currentUser.merchantId!;
-    }
-
-    const orders = await prisma.order.findMany({
-      where: { merchantId: targetMerchantId }
+    const result = await clickhouse.query({
+      query,
+      query_params: { merchantId, days },
+      format: 'JSONEachRow'
     });
 
-    return { orders };
+    return { data: await result.json() };
+  });
+}
+```
+
+##### 审计日志
+
+```typescript
+// src/middleware/audit.ts
+import { FastifyRequest } from 'fastify';
+import { logger } from '../utils/logger';
+
+export async function auditMiddleware(request: FastifyRequest) {
+  logger.info('data_access', {
+    userId: request.user.userId,
+    merchantId: request.user.merchantId,
+    role: request.user.role,
+    resource: request.routerPath,
+    method: request.method,
+    query: request.query,
+    timestamp: new Date().toISOString(),
   });
 }
 ```
