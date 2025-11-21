@@ -23,9 +23,50 @@ export interface VerifyTokenResponse {
   scopes: string[];
 }
 
+export interface MerchantProfile {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  logo_url?: string;
+  default_currency: string;
+  origin_country_alpha2: string;
+  origin_city: string;
+  origin_line_1: string;
+  origin_state: string;
+  contact_name: string;
+  contact_phone: string;
+  contact_email: string;
+  is_active: boolean;
+}
+
+/**
+ * 从 commerce-backend 获取商户信息
+ */
+async function fetchMerchantProfile(token: string): Promise<MerchantProfile | null> {
+  try {
+    const response = await axios.get<MerchantProfile>('https://api.optima.chat/api/merchants/me', {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 10000,
+    });
+    return response.data;
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      if (err.response?.status === 404) {
+        // User is not a merchant or merchant profile not found
+        logger.debug('Merchant profile not found');
+        return null;
+      }
+    }
+    logger.warn({ err }, 'Failed to fetch merchant profile');
+    return null;
+  }
+}
+
 /**
  * 验证 access token
  * 调用 auth.optima.chat 的验证端点
+ * 如果用户是 merchant，会自动获取 merchant_id
  */
 export async function verifyAccessToken(token: string): Promise<VerifyTokenResponse> {
   try {
@@ -40,6 +81,18 @@ export async function verifyAccessToken(token: string): Promise<VerifyTokenRespo
     );
 
     logger.debug({ userId: response.data.user_id }, 'Token verified successfully');
+
+    // If user is a merchant, fetch merchant_id from commerce-backend
+    if (response.data.role === 'merchant') {
+      const merchantProfile = await fetchMerchantProfile(token);
+      if (merchantProfile) {
+        response.data.merchant_id = merchantProfile.id;
+        logger.debug({ merchantId: merchantProfile.id }, 'Merchant profile fetched');
+      } else {
+        logger.warn({ userId: response.data.user_id }, 'Merchant role but no profile found');
+      }
+    }
+
     return response.data;
   } catch (err) {
     if (axios.isAxiosError(err)) {

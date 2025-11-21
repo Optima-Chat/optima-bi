@@ -29,6 +29,10 @@ export function getConfig(): CliConfig {
 }
 
 export function setConfig(key: keyof CliConfig, value: any): void {
+  // Clear the key first if it exists and value is an object
+  if (config.has(key) && typeof value === 'object' && value !== null) {
+    config.delete(key);
+  }
   config.set(key, value);
 }
 

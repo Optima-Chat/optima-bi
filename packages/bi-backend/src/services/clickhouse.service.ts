@@ -77,7 +77,7 @@ export async function getDailySales(merchantId: string, days: number): Promise<D
     format: 'JSONEachRow',
   });
 
-  const data = await result.json<DailySalesRow>();
+  const data = await result.json<DailySalesRow[]>();
 
   logger.info({
     msg: 'Query executed',
@@ -97,7 +97,7 @@ export async function testConnection(): Promise<boolean> {
       format: 'JSONEachRow',
     });
 
-    const data = await result.json();
+    const data = await result.json<Array<{ ping: number }>>();
     return data.length > 0;
   } catch (err) {
     logger.error({ err }, 'ClickHouse connection test failed');

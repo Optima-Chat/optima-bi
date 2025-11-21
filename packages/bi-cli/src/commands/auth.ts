@@ -9,6 +9,7 @@ interface DeviceCodeResponse {
   device_code: string;
   user_code: string;
   verification_uri: string;
+  verification_uri_complete?: string;
   expires_in: number;
   interval: number;
 }
@@ -74,17 +75,31 @@ export function createAuthCommand(): Command {
         );
         spinner.succeed('Device code received');
 
-        const { device_code, user_code, verification_uri, expires_in, interval } =
-          deviceCodeRes.data;
+        const {
+          device_code,
+          user_code,
+          verification_uri,
+          verification_uri_complete,
+          expires_in,
+          interval,
+        } = deviceCodeRes.data;
+
+        // Use verification_uri_complete if available (includes code pre-filled)
+        const browserUrl = verification_uri_complete || verification_uri;
 
         // Step 2: Display authorization instructions
         console.log(chalk.bold('\n📋 Authorization Required:\n'));
-        console.log(`  1. Visit: ${chalk.cyan(verification_uri)}`);
-        console.log(`  2. Enter code: ${chalk.yellow.bold(user_code)}\n`);
+        if (verification_uri_complete) {
+          console.log(`  Opening browser with pre-filled code: ${chalk.yellow.bold(user_code)}`);
+          console.log(`  URL: ${chalk.cyan(verification_uri_complete)}\n`);
+        } else {
+          console.log(`  1. Visit: ${chalk.cyan(verification_uri)}`);
+          console.log(`  2. Enter code: ${chalk.yellow.bold(user_code)}\n`);
+        }
 
         // Step 3: Open browser automatically
         const { default: open } = await import('open');
-        await open(verification_uri);
+        await open(browserUrl);
         info('Browser opened automatically');
 
         // Step 4: Poll for token
@@ -93,12 +108,16 @@ export function createAuthCommand(): Command {
         const expiresAt = startTime + expires_in * 1000;
 
         let token: TokenResponse | null = null;
+        let pollCount = 0;
 
         while (Date.now() < expiresAt) {
           await new Promise((resolve) => setTimeout(resolve, interval * 1000));
+          pollCount++;
 
           try {
-            const tokenRes = await axios.post<TokenResponse>(
+            const tokenRes = await axios.post<
+              TokenResponse | { error: string; error_description: string }
+            >(
               `${authUrl}/api/v1/oauth/device/token`,
               new URLSearchParams({
                 grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
@@ -112,18 +131,41 @@ export function createAuthCommand(): Command {
               }
             );
 
-            token = tokenRes.data;
+            // Check if response contains an error (auth server returns 200 with error object)
+            if ('error' in tokenRes.data) {
+              const errorCode = tokenRes.data.error;
+              if (errorCode === 'authorization_pending') {
+                pollSpinner.text = `Waiting for authorization... (attempt ${pollCount})`;
+                continue;
+              } else if (errorCode === 'slow_down') {
+                pollSpinner.text = `Slowing down polling... (attempt ${pollCount})`;
+                await new Promise((resolve) => setTimeout(resolve, 5000));
+                continue;
+              } else {
+                pollSpinner.fail(`Polling failed: ${errorCode}`);
+                throw new Error(tokenRes.data.error_description);
+              }
+            }
+
+            token = tokenRes.data as TokenResponse;
+            pollSpinner.text = `Authorization successful after ${pollCount} attempts`;
             break;
           } catch (err: unknown) {
             const error = err as { response?: { data?: { error?: string } } };
-            if (error.response?.data?.error === 'authorization_pending') {
+            const errorCode = error.response?.data?.error;
+
+            if (errorCode === 'authorization_pending') {
               // Continue polling
+              pollSpinner.text = `Waiting for authorization... (attempt ${pollCount})`;
               continue;
-            } else if (error.response?.data?.error === 'slow_down') {
+            } else if (errorCode === 'slow_down') {
               // Increase interval
+              pollSpinner.text = `Slowing down polling... (attempt ${pollCount})`;
               await new Promise((resolve) => setTimeout(resolve, 5000));
               continue;
             } else {
+              // Unexpected error
+              pollSpinner.fail(`Polling failed: ${errorCode || 'unknown error'}`);
               throw err;
             }
           }
@@ -135,18 +177,22 @@ export function createAuthCommand(): Command {
           process.exit(1);
         }
 
-        pollSpinner.succeed('Authorization successful');
+        pollSpinner.succeed();
 
         // Step 5: Save tokens
         setConfig('accessToken', token.access_token);
         setConfig('refreshToken', token.refresh_token);
 
-        // Step 6: Fetch user info
-        const userInfo = await axios.get<UserInfo>(`${authUrl}/api/v1/auth/me`, {
-          headers: { Authorization: `Bearer ${token.access_token}` },
-        });
-
-        success(`Logged in as ${chalk.bold(userInfo.data.email)} (${userInfo.data.role})`);
+        // Step 6: Fetch user info (optional - just for display)
+        try {
+          const userInfo = await axios.get<UserInfo>(`${authUrl}/api/v1/users/me`, {
+            headers: { Authorization: `Bearer ${token.access_token}` },
+          });
+          success(`Logged in as ${chalk.bold(userInfo.data.email)} (${userInfo.data.role})`);
+        } catch (userInfoErr) {
+          // If fetching user info fails, still consider login successful
+          success('Login successful! Token saved.');
+        }
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : 'Unknown error';
         error(`Login failed: ${errorMsg}`);
@@ -176,7 +222,7 @@ export function createAuthCommand(): Command {
       }
 
       try {
-        const userInfo = await axios.get<UserInfo>(`${cfg.authUrl}/api/v1/auth/me`, {
+        const userInfo = await axios.get<UserInfo>(`${cfg.authUrl}/api/v1/users/me`, {
           headers: { Authorization: `Bearer ${cfg.accessToken}` },
         });
 
