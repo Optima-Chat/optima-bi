@@ -285,13 +285,63 @@ export default async function DashboardPage() {
 
 ## 部署架构
 
-### Option 1: Vercel（推荐）
-- 零配置部署
-- 全球 CDN
-- 自动 HTTPS
-- Preview Deployments（每个 PR 自动部署预览）
+### Vercel 部署（首选方案）
 
-### Option 2: 自托管 Docker
+**为什么选择 Vercel**:
+- ✅ **零配置部署**: 连接 GitHub 仓库，自动部署
+- ✅ **全球 CDN**: 自动分发到全球边缘节点
+- ✅ **自动 HTTPS**: 免费 SSL 证书
+- ✅ **Preview Deployments**: 每个 PR 自动生成预览 URL
+- ✅ **Edge Runtime**: 超低延迟（< 50ms）
+- ✅ **自动扩展**: 根据流量自动扩容
+- ✅ **免费层**: 个人项目完全免费
+
+**部署步骤**:
+```bash
+# 1. 安装 Vercel CLI
+npm i -g vercel
+
+# 2. 连接项目
+cd packages/bi-web
+vercel
+
+# 3. 配置环境变量（Vercel Dashboard）
+NEXTAUTH_URL=https://bi.optima.chat
+NEXTAUTH_SECRET=<生成的密钥>
+NEXT_PUBLIC_API_URL=https://bi-api.optima.chat
+
+# 4. 部署到生产环境
+vercel --prod
+
+# 5. 配置自定义域名
+vercel domains add bi.optima.chat
+```
+
+**Vercel 配置文件**:
+```json
+// vercel.json
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
+  "framework": "nextjs",
+  "regions": ["hkg1", "sfo1", "fra1"],
+  "env": {
+    "NEXTAUTH_URL": "@nextauth-url",
+    "NEXTAUTH_SECRET": "@nextauth-secret",
+    "NEXT_PUBLIC_API_URL": "@api-url"
+  }
+}
+```
+
+**GitHub 集成**:
+- 推送到 `main` 分支 → 自动部署到生产环境
+- 创建 PR → 自动生成预览 URL（`https://bi-web-pr-123.vercel.app`）
+- Commit 状态检查 → 部署成功才能合并
+
+### 备选方案: Docker 自托管（不推荐）
+
+> **注意**: 仅在有特殊合规要求时考虑自托管
+
 ```yaml
 # docker-compose.yml
 bi-web:
@@ -301,10 +351,16 @@ bi-web:
   environment:
     - NEXTAUTH_URL=https://bi.optima.chat
     - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
-    - API_URL=http://bi-backend:3001
+    - NEXT_PUBLIC_API_URL=http://bi-backend:3001
   depends_on:
     - bi-backend
 ```
+
+**缺点**:
+- ❌ 需要自己配置 CDN
+- ❌ 需要手动管理扩容
+- ❌ 需要配置 SSL 证书
+- ❌ 无 Preview Deployments
 
 ---
 

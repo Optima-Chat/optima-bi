@@ -925,6 +925,7 @@ Claude Code: "最近 7 天销售额 12.5 万美元，同比增长 6%。
 - ✅ 响应式布局（桌面 + 平板 + 移动）
 - ✅ 深色模式
 - ✅ 数据导出（CSV/Excel）
+- ✅ Vercel 生产环境部署
 
 **性能指标**:
 - ✅ FCP < 1.5s
@@ -937,9 +938,14 @@ Claude Code: "最近 7 天销售额 12.5 万美元，同比增长 6%。
 # 本地开发
 cd packages/bi-web
 npm run dev
-
 # 访问 http://localhost:3000
-# 登录后查看仪表盘
+
+# 部署到 Vercel（自动）
+git push origin main
+# 自动部署到 https://bi.optima.chat
+
+# 或手动部署
+vercel --prod
 ```
 
 ---
