@@ -1,93 +1,159 @@
 # Optima BI
 
-Business Intelligence 模块，为 Optima Commerce 商家提供数据智能分析功能。
+> AI 驱动的商业智能分析，为 Optima Commerce 商家和平台提供数据洞察
 
-## 架构设计
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue?style=flat&logo=typescript)](https://www.typescriptlang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-18+-green?style=flat&logo=node.js)](https://nodejs.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat)](https://opensource.org/licenses/MIT)
+
+## 🎯 核心理念
+
+商家用自然语言提问 → Claude Code 智能分析 → bi-cli 获取数据 → 生成洞察和建议
+
+**关键特性**:
+- 🤖 **AI 优先**: JSON 格式输出，专为 Claude Code 设计
+- 📊 **双输出模式**: JSON（AI 友好）+ Pretty 模式（彩色表格）
+- 🔐 **安全认证**: OAuth 2.0 Device Flow，Token 加密存储
+- 🏪 **商家分析**: 销售、客户、库存、财务、物流全方位数据
+- 🏢 **平台分析**: GMV、商家活跃度、订阅收入（管理员专用）
+
+## 🏗️ 架构设计
 
 ```
-商家用户 → Claude Code → bi-cli → bi-backend → Optima Commerce System
-          (AI 分析)   (数据获取) (数据处理)    (数据源)
+商家/管理员 → Claude Code → bi-cli → bi-backend → commerce-backend DB
+            (AI 分析)   (TypeScript) (Fastify)   (PostgreSQL 只读)
 ```
 
-## 核心组件
+**职责分离**:
+- **Claude Code**: AI 分析、洞察生成、决策建议
+- **bi-cli**: 数据获取、结构化输出（JSON/Pretty）
+- **bi-backend**: 数据查询、聚合计算、缓存优化
+- **commerce-backend DB**: 数据源（只读访问）
 
-- **Claude Code**: AI 驱动的智能分析和决策支持
-- **bi-cli**: 命令行工具，提供结构化数据获取能力
-- **bi-backend**: 后端服务，处理数据聚合、清洗和基础计算
+## 🚀 快速开始
 
-## 文档
-
-- [产品需求文档 (PRD)](./docs/prd.md)
-- [技术设计文档](./docs/tech-design.md)
-
-## 快速开始
-
-### 安装 bi-cli
+### 安装
 
 ```bash
-npm install -g @optima-chat/bi-cli
+npm install -g @optima-chat/bi-cli@latest
 ```
 
-### 配置认证
+### 认证
 
 ```bash
-bi-cli auth login --api-key YOUR_API_KEY
+# OAuth 2.0 Device Flow 认证
+bi-cli auth login
+
+# 会自动打开浏览器，输入代码完成授权
 ```
 
 ### 使用示例
 
+**在 Claude Code 中用自然语言**:
+```
+"分析最近7天的销售情况"
+"哪些客户流失了？"
+"库存低于 5 的商品有哪些？"
+```
+
+**或直接在终端使用**:
 ```bash
-# 查看最近7天销售数据
+# JSON 模式（默认，AI 友好）
 bi-cli sales get --days 7
 
-# 查看流失客户
+# Pretty 模式（彩色表格）
+bi-cli sales get --days 7 --pretty
+
+# 客户分析
 bi-cli customer get --segment churned
 
-# 查看低库存商品
+# 库存预警
 bi-cli inventory get --status low
+
+# 平台分析（管理员）
+bi-cli platform overview --month current
 ```
 
-## 通过 Claude Code 使用
+## 📦 核心功能
 
-```
-商家: "帮我分析最近7天的销售情况"
-Claude Code: [调用 bi-cli，分析数据，生成洞察和建议]
-```
+### 商家分析（🏪）
+- **销售数据**: GMV、订单量、客单价、增长率
+- **客户分析**: 新客/复购/流失、LTV、复购率
+- **库存管理**: 库存预警、周转率、销量排行
+- **财务报表**: 收入、手续费、净收入、转账记录
+- **物流跟踪**: 发货时长、配送时效、异常率
 
-## 开发
+### 平台分析（🏢 管理员专用）
+- **GMV 概览**: 平台总交易额、增长趋势
+- **商家分析**: 活跃商家、流失商家、Top 商家
+- **订阅收入**: MRR、ARR、流失率、转化率
+- **财务汇总**: 平台手续费收入、转账汇总
 
-### bi-cli
+## 📚 文档
+
+- **[产品需求文档 (PRD)](./docs/prd.md)** - 完整功能需求和用户故事
+- **[技术设计文档](./docs/tech-design.md)** - 架构设计和实现细节
+- **[研究总结](./docs/research-summary.md)** - 生态研究、架构决策、数据模型
+
+## 🛠️ 技术栈
+
+| 组件 | 技术 |
+|------|------|
+| **语言** | TypeScript + Node.js 18+ |
+| **bi-cli** | Commander.js + axios + conf |
+| **bi-backend** | Fastify + Prisma + Redis |
+| **数据库** | PostgreSQL 14+ (只读) |
+| **认证** | OAuth 2.0 Device Flow |
+| **部署** | Docker + Docker Compose |
+
+## 💻 开发
+
+### 环境要求
+- Node.js 18+
+- PostgreSQL 14+
+- Redis 7+
+
+### 启动开发环境
 
 ```bash
-cd packages/bi-cli
+# 克隆项目
+git clone https://github.com/Optima-Chat/optima-bi.git
+cd optima-bi
+
+# 安装依赖
 npm install
-npm run dev
-```
 
-### bi-backend
-
-```bash
-cd packages/bi-backend
-npm install
-npm run dev
-```
-
-使用 Docker Compose 启动完整环境：
-
-```bash
+# 启动服务（Docker Compose）
 docker compose up -d
+
+# bi-cli 开发
+cd packages/bi-cli
+npm run dev
+
+# bi-backend 开发
+cd packages/bi-backend
+npm run dev
 ```
 
-## 技术栈
+## 🔐 认证说明
 
-- **语言**: TypeScript / Node.js 18+
-- **CLI 框架**: Commander.js
-- **后端框架**: Express.js / Fastify
-- **数据库**: PostgreSQL 14+
-- **缓存**: Redis 7+
-- **ORM**: Prisma
-- **容器化**: Docker
+使用 **OAuth 2.0 Device Flow** 认证：
+1. 运行 `bi-cli auth login`
+2. 浏览器自动打开授权页面
+3. 输入显示的代码完成授权
+4. Token 加密存储到 `~/.optima/bi-cli/config.json`
 
-## 许可
+**多环境支持**:
+```bash
+bi-cli auth login --env production   # 生产环境
+bi-cli auth login --env stage        # 测试环境
+bi-cli auth login --env development  # 开发环境
+```
+
+## 📄 许可
 
 MIT License
+
+---
+
+**Built with ❤️ for Optima Commerce merchants and platform team**
