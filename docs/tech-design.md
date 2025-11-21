@@ -88,16 +88,25 @@ commerce DB → bi-backend → bi-cli → Claude Code → 商家
 
 ### 2.2 命令设计
 
+**角色说明**：
+- **商家命令**：自动基于 OAuth token 中的 user_id 查询商家数据
+- **平台命令**：需要管理员权限，可查看平台整体或指定商家数据
+
 #### 2.2.1 全局配置
 ```bash
-# 认证
-bi-cli auth login --api-key <key>
+# 认证（使用 optima CLI 的 OAuth token）
+bi-cli auth login  # 使用 optima auth 的配置
 
 # 配置 backend 地址
 bi-cli config set backend-url https://bi-api.optima.com
 
 # 查看配置
 bi-cli config list
+
+# 查看当前用户角色
+bi-cli auth whoami
+# 输出: Role: merchant, Merchant ID: merchant_xxx
+# 或:   Role: admin, Permissions: [platform:read, ...]
 ```
 
 #### 2.2.2 销售数据
@@ -270,7 +279,7 @@ Options:
   bi-cli trends get --period 180 --granularity week
 ```
 
-#### 2.2.6 报告数据
+#### 2.2.6 报告数据（商家）
 ```bash
 # 获取报告数据
 bi-cli report get [options]
@@ -282,6 +291,97 @@ Options:
 示例:
   bi-cli report get --type weekly
   bi-cli report get --type monthly --date 2024-01
+```
+
+---
+
+### 2.2.7 平台命令（需管理员权限）
+
+#### 2.2.7.1 平台概览
+```bash
+# 平台整体概览
+bi-cli platform overview [options]
+
+Options:
+  --month <month>        月份 (默认: current, 格式: 2024-01)
+  --days <number>        最近N天
+  --metrics <list>       指标列表 (gmv,orders,merchants,buyers)
+
+示例:
+  bi-cli platform overview --month current
+  bi-cli platform overview --days 30 --metrics gmv,merchants
+```
+
+**输出示例**：
+```json
+{
+  "period": {"start": "2024-01-01", "end": "2024-01-31"},
+  "metrics": {
+    "gmv": 1250000.00,
+    "totalOrders": 5432,
+    "activeMerchants": 234,
+    "activeBuyers": 3456,
+    "averageOrderValue": 230.12
+  },
+  "growth": {
+    "gmvGrowth": 0.15,
+    "merchantGrowth": 0.08,
+    "buyerGrowth": 0.12
+  }
+}
+```
+
+#### 2.2.7.2 商家分析
+```bash
+# 商家活跃度分析
+bi-cli platform merchants [options]
+
+Options:
+  --segment <type>       商家分层 (all,active,sleeping,churned,top)
+  --month <month>        月份
+  --sort-by <field>      排序字段 (gmv,orders,created_at)
+  --limit <number>       返回数量 (默认: 100)
+
+示例:
+  bi-cli platform merchants --segment churned --month current
+  bi-cli platform merchants --segment top --sort-by gmv --limit 10
+```
+
+#### 2.2.7.3 订阅分析
+```bash
+# 订阅会员分析
+bi-cli platform subscription [options]
+
+Options:
+  --plan <type>          订阅计划 (all,pro,enterprise)
+  --month <month>        月份
+  --metrics <list>       指标列表 (mrr,arr,churn,conversion)
+
+示例:
+  bi-cli platform subscription --plan pro --month current
+  bi-cli platform subscription --metrics mrr,arr,churn
+```
+
+#### 2.2.7.4 平台财务
+```bash
+# 平台收入分析
+bi-cli platform revenue [options]
+
+Options:
+  --month <month>        月份
+  --breakdown            显示收入细分 (交易手续费/订阅)
+
+示例:
+  bi-cli platform revenue --month current --breakdown
+```
+
+#### 2.2.7.5 指定商家查询（管理员）
+```bash
+# 查看指定商家的数据（管理员权限）
+bi-cli sales get --merchant-id merchant_xxx --days 30
+bi-cli customer get --merchant-id merchant_xxx --segment all
+
+# 所有商家命令都可以加 --merchant-id 参数来查看指定商家数据
 ```
 
 ### 2.3 配置文件
@@ -801,10 +901,130 @@ logger.error(
 ## 7. 安全设计
 
 ### 7.1 认证授权
-- **OAuth 2.0 认证**：使用 user-auth 服务统一认证
-- **商家数据隔离**：自动基于 merchant_id 过滤数据
-- **只读权限**：数据库用户只有 SELECT 权限，无法修改数据
-- **Token 验证**：每个请求都验证 OAuth token 有效性
+
+#### 7.1.1 角色定义
+```python
+class UserRole(str, Enum):
+    MERCHANT = "merchant"  # 商家角色
+    ADMIN = "admin"        # 平台管理员
+```
+
+#### 7.1.2 权限矩阵
+
+| 功能模块 | 商家 (merchant) | 管理员 (admin) |
+|---------|----------------|---------------|
+| 查看自己店铺数据 | ✅ | ✅ |
+| 查看其他商家数据 | ❌ | ✅ |
+| 查看平台整体数据 | ❌ | ✅ |
+| 商家分析（platform merchants） | ❌ | ✅ |
+| 订阅分析（platform subscription） | ❌ | ✅ |
+| 平台财务（platform revenue） | ❌ | ✅ |
+
+#### 7.1.3 认证流程
+```python
+# FastAPI Dependency
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+) -> CurrentUser:
+    # 1. 调用 user-auth 验证 token
+    user_info = await verify_token(token)
+
+    # 2. 获取用户角色
+    role = user_info.get("role")  # merchant or admin
+    user_id = user_info.get("user_id")
+
+    # 3. 如果是商家，查询 merchant_id
+    merchant_id = None
+    if role == "merchant":
+        merchant = db.query(Merchant).filter(
+            Merchant.user_id == user_id
+        ).first()
+        if not merchant:
+            raise HTTPException(401, "Merchant not found")
+        merchant_id = merchant.id
+
+    return CurrentUser(
+        user_id=user_id,
+        role=role,
+        merchant_id=merchant_id,
+        permissions=user_info.get("permissions", [])
+    )
+```
+
+#### 7.1.4 数据隔离
+```python
+# 商家查询（自动过滤）
+@router.get("/sales")
+async def get_sales(
+    days: int = 7,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # 商家只能查看自己的数据
+    query = db.query(Order).filter(
+        Order.merchant_id == current_user.merchant_id
+    )
+    # ...
+
+# 平台查询（需要管理员权限）
+@router.get("/platform/overview")
+async def platform_overview(
+    current_user: CurrentUser = Depends(require_admin),  # 需要管理员
+    db: Session = Depends(get_db)
+):
+    # 查询所有商家数据
+    query = db.query(Order)  # 不过滤 merchant_id
+    # ...
+
+# 管理员查看指定商家数据
+@router.get("/sales")
+async def get_sales(
+    merchant_id: Optional[str] = None,  # 管理员可指定
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # 如果指定了 merchant_id，验证权限
+    if merchant_id:
+        if current_user.role != "admin":
+            raise HTTPException(403, "Admin role required")
+        target_merchant_id = merchant_id
+    else:
+        # 商家默认查询自己的数据
+        target_merchant_id = current_user.merchant_id
+
+    query = db.query(Order).filter(
+        Order.merchant_id == target_merchant_id
+    )
+    # ...
+```
+
+#### 7.1.5 权限验证装饰器
+```python
+def require_admin(
+    current_user: CurrentUser = Depends(get_current_user)
+) -> CurrentUser:
+    """要求管理员权限"""
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Admin role required"
+        )
+    return current_user
+
+def require_permission(permission: str):
+    """要求特定权限"""
+    def dependency(
+        current_user: CurrentUser = Depends(get_current_user)
+    ) -> CurrentUser:
+        if permission not in current_user.permissions:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Permission '{permission}' required"
+            )
+        return current_user
+    return dependency
+```
 
 ### 7.2 数据安全
 - **HTTPS 传输**：所有 API 调用使用 HTTPS
