@@ -83,8 +83,140 @@ commerce DB → bi-backend → bi-cli → Claude Code → 商家
 - **CLI 框架**：Commander.js 或 oclif
 - **HTTP 客户端**：axios 或 ky（支持重试和拦截器）
 - **数据验证**：zod（TypeScript-first schema validation）
-- **配置管理**：cosmiconfig + dotenv
+- **配置管理**：conf（加密存储）+ dotenv
 - **测试**：vitest 或 jest
+
+### 2.1.1 OAuth 认证流程
+
+**认证方式：OAuth 2.0 Device Flow**
+
+参考 commerce-cli 的实现，bi-cli 使用 OAuth 2.0 Device Flow 进行认证：
+
+```bash
+bi-cli auth login
+```
+
+**认证流程**：
+1. **请求 Device Code**
+   - 调用 `POST https://auth.optima.shop/oauth/device`
+   - 获取 `device_code`, `user_code`, `verification_uri`
+
+2. **用户授权**
+   - CLI 显示授权 URL 和用户代码
+   - 自动打开浏览器，引导用户授权
+   - 用户在浏览器中输入代码并登录
+
+3. **轮询获取 Token**
+   - CLI 轮询 `POST https://auth.optima.shop/oauth/token`
+   - 参数：`grant_type=urn:ietf:params:oauth:grant-type:device_code`
+   - 获取 `access_token`, `refresh_token`, `expires_in`
+
+4. **保存 Token**
+   - 加密存储到 `~/.optima/bi-cli/config.json`
+   - 使用 `conf` 库进行加密存储
+
+5. **自动刷新**
+   - Token 过期前自动使用 `refresh_token` 刷新
+
+**配置文件结构**：
+```json
+{
+  "tokens": {
+    "access_token": "eyJhbG...",
+    "refresh_token": "eyJhbG...",
+    "expires_in": 3600,
+    "expires_at": 1706789400
+  },
+  "user": {
+    "id": "user_123",
+    "email": "merchant@example.com",
+    "role": "merchant"
+  },
+  "api_url": "https://bi-api.optima.shop",
+  "auth_url": "https://auth.optima.shop"
+}
+```
+
+**多环境支持**：
+```bash
+# 默认使用 production 环境
+bi-cli auth login
+
+# 使用 stage 环境
+bi-cli auth login --env stage
+
+# 使用 development 环境
+bi-cli auth login --env development
+```
+
+**环境配置**：
+- **production**: `auth.optima.shop` / `bi-api.optima.shop`
+- **stage**: `auth-stage.optima.shop` / `bi-api-stage.optima.shop`
+- **development**: `auth.optima.chat` / `bi-api.optima.chat`
+
+### 2.1.2 输出格式
+
+参考 commerce-cli 的设计，bi-cli 支持两种输出模式：
+
+**JSON 模式（默认，AI 友好）**
+
+适合 Claude Code 和程序化处理，所有命令默认输出结构化 JSON：
+
+```bash
+bi-cli sales get --days 7
+# 输出标准 JSON 格式
+{
+  "success": true,
+  "data": {
+    "metrics": {...},
+    "daily": [...]
+  },
+  "meta": {
+    "executionTime": 234,
+    "cachedAt": "2024-01-21T10:30:00Z"
+  }
+}
+```
+
+**Pretty 模式（人类可读）**
+
+使用 `--pretty` 或 `--format table` 选项，输出彩色表格：
+
+```bash
+bi-cli sales get --days 7 --pretty
+
+┌─────────────────────────────────────────┐
+│  销售数据（最近 7 天）                   │
+├─────────────────────────────────────────┤
+│  总销售额:       $125,680.50            │
+│  订单数量:       342                    │
+│  客单价:         $367.54                │
+│  增长率:         +6.06%                 │
+└─────────────────────────────────────────┘
+
+每日趋势:
+┌────────────┬────────────┬──────┬──────────┐
+│ 日期       │ 销售额     │ 订单 │ 客单价   │
+├────────────┼────────────┼──────┼──────────┤
+│ 2024-01-15 │ $18,234.50 │  52  │ $350.67  │
+│ 2024-01-16 │ $19,120.00 │  54  │ $354.07  │
+│ ...        │            │      │          │
+└────────────┴────────────┴──────┴──────────┘
+```
+
+**统一响应格式**：
+```typescript
+interface CliResponse<T> {
+  success: boolean;
+  data?: T;
+  message?: string;
+  error?: string;
+}
+```
+
+**使用场景**：
+- **JSON 模式**（默认）：Claude Code、自动化脚本、数据导出
+- **Pretty 模式**：终端手动执行、调试、快速查看
 
 ### 2.2 命令设计
 
@@ -384,23 +516,87 @@ bi-cli customer get --merchant-id merchant_xxx --segment all
 # 所有商家命令都可以加 --merchant-id 参数来查看指定商家数据
 ```
 
-### 2.3 配置文件
+### 2.3 配置管理
 
-**位置**：`~/.optima/bi-cli/config.json`
+**配置目录**：`~/.optima/bi-cli/`
 
+**文件结构**：
+```
+~/.optima/bi-cli/
+├── config-prod.json          # Production 环境配置（加密存储）
+├── config-stage.json         # Stage 环境配置
+├── config-dev.json           # Development 环境配置
+└── current-env.json          # 当前激活的环境
+```
+
+**配置文件内容**（加密存储，使用 `conf` 库）：
 ```json
 {
-  "backendUrl": "https://bi-api.optima.com",
-  "apiKey": "encrypted_api_key",
-  "timeout": 30000,
-  "cache": {
-    "enabled": true,
-    "ttl": 300
+  "tokens": {
+    "access_token": "eyJhbGciOiJSUzI1NiIs...",
+    "refresh_token": "eyJhbGciOiJSUzI1NiIs...",
+    "expires_in": 3600,
+    "expires_at": 1706789400
   },
-  "output": {
-    "format": "json",
-    "colorize": false
+  "user": {
+    "id": "user_abc123",
+    "email": "merchant@example.com",
+    "name": "John Doe",
+    "role": "merchant"
+  },
+  "api_url": "https://bi-api.optima.shop",
+  "auth_url": "https://auth.optima.shop"
+}
+```
+
+**配置命令**：
+```bash
+# 查看当前环境
+bi-cli config get env
+
+# 切换环境
+bi-cli auth switch --env stage
+
+# 查看所有配置
+bi-cli config list
+
+# 设置特定配置项（高级用法）
+bi-cli config set api-url https://custom-bi-api.com
+```
+
+**自动刷新 Token**：
+```typescript
+// src/utils/auth.ts
+import { getConfig, saveTokens } from './config';
+import axios from 'axios';
+
+export async function getValidToken(): Promise<string> {
+  const config = getConfig();
+  const { tokens } = config;
+
+  // 检查是否过期（提前 5 分钟刷新）
+  const now = Math.floor(Date.now() / 1000);
+  if (tokens.expires_at - now < 300) {
+    // 刷新 Token
+    const { data } = await axios.post(
+      `${config.auth_url}/oauth/token`,
+      {
+        grant_type: 'refresh_token',
+        refresh_token: tokens.refresh_token,
+        client_id: 'bi-cli'
+      }
+    );
+
+    saveTokens(
+      data.access_token,
+      data.refresh_token,
+      data.expires_in
+    );
+
+    return data.access_token;
   }
+
+  return tokens.access_token;
 }
 ```
 
@@ -570,7 +766,7 @@ import { prisma } from '../db';
 interface UserInfo {
   userId: string;
   role: 'merchant' | 'admin';
-  permissions: string[];
+  scopes: string[];
 }
 
 declare module 'fastify' {
@@ -590,16 +786,28 @@ export async function authMiddleware(
   }
 
   try {
-    // 调用 user-auth 验证 token
-    const { data } = await axios.get(
+    // 调用 user-auth 验证 token（POST JSON）
+    // API: POST https://auth.optima.shop/api/v1/auth/verify
+    const { data } = await axios.post(
       `${process.env.AUTH_BASE_URL}/api/v1/auth/verify`,
-      { headers: { Authorization: `Bearer ${token}` } }
+      {
+        token: token,
+        required_scope: null // bi-backend 不需要特定 scope
+      }
     );
+
+    // 检查 token 是否有效
+    if (!data.valid) {
+      return reply.code(401).send({
+        error: 'Invalid token',
+        detail: data.error
+      });
+    }
 
     const userInfo: UserInfo = {
       userId: data.user_id,
-      role: data.role,
-      permissions: data.permissions || []
+      role: data.role, // customer, merchant, admin
+      scopes: data.scopes || []
     };
 
     // 如果是商家，查询 merchant_id
@@ -617,8 +825,9 @@ export async function authMiddleware(
     } else {
       request.user = userInfo;
     }
-  } catch (error) {
-    return reply.code(401).send({ error: 'Invalid token' });
+  } catch (error: any) {
+    console.error('Auth middleware error:', error.message);
+    return reply.code(401).send({ error: 'Token verification failed' });
   }
 }
 ```
