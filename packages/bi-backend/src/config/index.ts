@@ -20,4 +20,9 @@ export const config = {
     l1Ttl: 60, // 1 minute
     l2Ttl: 300, // 5 minutes
   },
+  oauth: {
+    authUrl: process.env.AUTH_URL || 'https://auth.optima.chat',
+    clientId: process.env.OAUTH_CLIENT_ID || '',
+    clientSecret: process.env.OAUTH_CLIENT_SECRET || '',
+  },
 };
