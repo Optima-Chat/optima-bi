@@ -15,6 +15,7 @@
 - 📊 **双输出模式**: JSON（AI 友好）+ Pretty 模式（彩色表格）
 - 🎨 **Web Dashboard**: 可视化图表，交互式分析，移动端友好
 - 🔐 **安全认证**: OAuth 2.0 Device Flow（CLI）/ Web Flow（Dashboard）
+- 🛡️ **多租户隔离**: 应用层权限过滤，商家只看自己数据
 - 🏪 **商家分析**: 销售、客户、库存、财务、物流全方位数据
 - 🏢 **平台分析**: GMV、商家活跃度、订阅收入（管理员专用）
 
@@ -144,9 +145,10 @@ npm run dev
 - **[开发路线图](./docs/roadmap.md)** - 8-10周（CLI + ClickHouse）/ 11-13周（含 Web）
 
 **深入阅读**:
-- **[ADR 索引](./docs/architecture/adr-index.md)** - 7个架构决策记录
-  - [ADR-006: ClickHouse + CDC](./docs/architecture/adr-006-clickhouse-olap.md) - OLAP 架构
-  - [ADR-007: Web Dashboard](./docs/architecture/adr-007-web-dashboard.md) - 可视化界面
+- **[ADR 索引](./docs/architecture/adr-index.md)** - 8个架构决策记录
+  - [ADR-006: ClickHouse + CDC](./docs/architecture/adr-006-clickhouse-olap.md) - OLAP 架构（50-1000x 性能提升）
+  - [ADR-007: Web Dashboard](./docs/architecture/adr-007-web-dashboard.md) - 可视化界面（Vercel 部署）
+  - [ADR-008: Row-Level Security](./docs/architecture/adr-008-row-level-security.md) - 数据权限隔离
 - **[性能优化](./docs/performance-optimization.md)** - ClickHouse、CDC、多层缓存
 - **[专家评审](./docs/expert-review.md)** - 第三方评审（6.7/10）
 - **[研究总结](./docs/research-summary.md)** - 生态研究导航
@@ -196,8 +198,9 @@ cd packages/bi-backend
 npm run dev
 ```
 
-## 🔐 认证说明
+## 🔐 认证与权限
 
+### OAuth 认证
 使用 **OAuth 2.0 Device Flow** 认证：
 1. 运行 `bi-cli auth login`
 2. 浏览器自动打开授权页面
@@ -210,6 +213,12 @@ bi-cli auth login --env production   # 生产环境
 bi-cli auth login --env stage        # 测试环境
 bi-cli auth login --env development  # 开发环境
 ```
+
+### 数据权限隔离
+- **商家用户**：只能查看自己商店的数据（自动过滤 `merchant_id`）
+- **平台管理员**：可以查看所有商家的聚合数据和排行榜
+- **实现方式**：应用层权限过滤（bi-backend 中间件 + Query Builder）
+- 详见：[ADR-008: Row-Level Security](./docs/architecture/adr-008-row-level-security.md)
 
 ## 📄 许可
 
