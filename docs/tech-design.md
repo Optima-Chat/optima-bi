@@ -13,62 +13,78 @@ graph TB
     end
 
     subgraph "CLI 层 - 数据获取层"
-        B -->|执行命令| C[bi-cli]
+        B -->|执行命令| C[bi-cli<br/>Python CLI]
         C -->|sales get| C1[销售数据]
         C -->|customer get| C2[客户数据]
         C -->|inventory get| C3[库存数据]
-        C -->|trends get| C4[趋势数据]
-        C -->|report get| C5[报告数据]
+        C -->|finance get| C4[财务数据]
+        C -->|logistics get| C5[物流数据]
+        C -->|product get| C6[商品数据]
     end
 
-    subgraph "后端服务层 - 数据处理层"
-        C -->|HTTP/REST| D[bi-backend]
-        D1[数据聚合服务] -->|聚合| D
-        D2[数据清洗服务] -->|清洗| D
-        D3[指标计算服务] -->|计算| D
-        D4[缓存服务] -->|缓存| D
+    subgraph "后端服务层 - 数据查询层"
+        C -->|HTTP/REST| D[bi-backend<br/>FastAPI]
+        D1[OAuth 认证] --> D
+        D2[查询服务] --> D
+        D3[聚合计算] --> D
+        D4[缓存服务] --> D
     end
 
     subgraph "数据源层"
-        D -->|API 调用| E[Optima Commerce System]
-        E1[Orders API] --> E
-        E2[Products API] --> E
-        E3[Customers API] --> E
-        E4[Inventory API] --> E
+        D -->|只读 SQL 查询| E[commerce-backend<br/>PostgreSQL]
+        E -->|复用模型| E1[Order/OrderItem]
+        E -->|复用模型| E2[Product/Variant]
+        E -->|复用模型| E3[Merchant]
+        E -->|复用模型| E4[MerchantTransfer]
+        E -->|复用模型| E5[Review/Subscription]
     end
 
-    subgraph "存储层"
-        D -.->|读写| F[PostgreSQL]
-        D -.->|缓存| G[Redis]
+    subgraph "认证层"
+        D -->|验证 Token| F[user-auth<br/>OAuth 2.0]
+    end
+
+    subgraph "缓存层"
+        D -.->|查询缓存| G[Redis 7+]
     end
 
     style B fill:#f9f,stroke:#333,stroke-width:3px
     style C fill:#bbf,stroke:#333,stroke-width:2px
     style D fill:#bfb,stroke:#333,stroke-width:2px
     style E fill:#fbb,stroke:#333,stroke-width:2px
+    style F fill:#ffd,stroke:#333,stroke-width:2px
 ```
 
 ### 1.2 设计原则
 
 **职责分离**：
 - **Claude Code**：负责 AI 分析、洞察生成、建议输出
-- **bi-cli**：负责数据获取、结构化输出
-- **bi-backend**：负责数据聚合、清洗、基础计算
+- **bi-cli**：负责数据获取、结构化输出（Python CLI）
+- **bi-backend**：负责数据查询、聚合计算、缓存（FastAPI）
+- **commerce-backend DB**：数据源（只读访问）
 
 **数据流向**：
 ```
-Optima Commerce → bi-backend → bi-cli → Claude Code → 商家
-   (原始数据)     (结构化数据)  (JSON输出)  (智能分析)   (自然语言)
+commerce DB → bi-backend → bi-cli → Claude Code → 商家
+ (SQL查询)   (聚合计算)   (JSON输出)  (AI分析)    (自然语言)
 ```
+
+**关键设计决策**：
+1. **技术栈统一**：bi-backend 使用 Python + FastAPI，与 commerce-backend 保持一致
+2. **直接数据库访问**：bi-backend 直接连接 commerce-backend PostgreSQL（只读），避免 API 调用开销
+3. **模型复用**：直接复用 commerce-backend 的 SQLAlchemy 模型定义
+4. **无需数据同步**：实时查询源数据库，无需维护聚合表
+5. **OAuth 统一**：使用 user-auth 服务进行统一认证
+6. **缓存优化**：使用 Redis 缓存查询结果，减少数据库负载
 
 ## 2. bi-cli 设计
 
 ### 2.1 技术栈
-- **语言**：Node.js 18+ (TypeScript)
-- **CLI 框架**：Commander.js
-- **HTTP 客户端**：axios
-- **数据验证**：zod
-- **测试**：vitest
+- **语言**：Python 3.11+
+- **CLI 框架**：Click 或 Typer（现代化 Python CLI）
+- **HTTP 客户端**：httpx（异步支持）
+- **数据验证**：Pydantic v2（与 FastAPI 一致）
+- **配置管理**：pydantic-settings
+- **测试**：pytest
 
 ### 2.2 命令设计
 
@@ -313,30 +329,54 @@ Options:
 ## 3. bi-backend 设计
 
 ### 3.1 技术栈
-- **语言**：Node.js 18+ (TypeScript)
-- **框架**：Express.js / Fastify
-- **ORM**：Prisma
-- **数据库**：PostgreSQL 14+
+- **语言**：Python 3.11+
+- **框架**：FastAPI（与 commerce-backend 一致）
+- **ORM**：SQLAlchemy 2.0（复用 commerce-backend 模型）
+- **数据库**：PostgreSQL 14+（只读连接到 commerce-backend 数据库）
 - **缓存**：Redis 7+
-- **任务队列**：BullMQ
-- **测试**：Jest
+- **HTTP 客户端**：httpx（用于调用 user-auth）
+- **测试**：pytest（与 commerce-backend 一致）
 - **部署**：Docker + Docker Compose
+
+### 3.1.1 模型复用策略
+bi-backend 直接复用 commerce-backend 的 SQLAlchemy 模型：
+- **方式1**：Git submodule 引用 commerce-backend/src/models
+- **方式2**：Python package 依赖（将 commerce-backend models 发布为独立包）
+- **方式3**：直接复制模型文件（初期快速开发）
+
+**复用的核心模型**：
+```python
+from commerce_backend.models import (
+    Order, OrderItem,          # 订单数据
+    Product,                    # 商品数据
+    Merchant,                   # 商户数据
+    MerchantTransfer,          # 转账数据
+    Subscription,              # 订阅数据
+    Review,                    # 评价数据
+    InventoryLog,              # 库存日志
+    OrderStatusHistory,        # 订单状态历史
+)
+```
 
 ### 3.2 API 设计
 
 #### 3.2.1 认证
+使用与 commerce-backend 相同的 OAuth 2.0 认证：
 ```
-POST /api/v1/auth/verify
+GET /api/v1/sales
 Headers:
-  X-API-Key: <api-key>
+  Authorization: Bearer <oauth_token>
 
-Response:
-{
-  "valid": true,
-  "merchantId": "merchant_123",
-  "permissions": ["read:sales", "read:customers"]
-}
+# bi-backend 会调用 user-auth 服务验证 token
+# 验证通过后，从 token 中提取 user_id，查询 merchants 表获取 merchant_id
 ```
+
+**认证流程**：
+1. bi-cli 从配置文件读取 OAuth token（商家通过 optima auth login 获得）
+2. bi-cli 请求 bi-backend 时携带 `Authorization: Bearer <token>` header
+3. bi-backend 使用 FastAPI Dependency 调用 user-auth 验证 token
+4. 验证通过后，根据 user_id 查询 `merchants` 表获取 `merchant_id`
+5. 所有 BI 查询都自动限定在该商家的数据范围内
 
 #### 3.2.2 销售数据 API
 ```
@@ -382,84 +422,119 @@ Response: 同 bi-cli 输出格式
 sequenceDiagram
     participant CLI as bi-cli
     participant API as bi-backend API
+    participant Auth as user-auth OAuth
     participant Cache as Redis Cache
-    participant Agg as 数据聚合服务
-    participant OC as Optima Commerce
+    participant DB as commerce DB
 
-    CLI->>API: GET /api/v1/sales?days=7
-    API->>Cache: 检查缓存
+    CLI->>API: GET /api/v1/sales?days=7<br/>Authorization: Bearer <token>
+    API->>Auth: 验证 OAuth token
+    Auth-->>API: user_id + 权限
+    API->>DB: 查询 merchants 表（user_id）
+    DB-->>API: merchant_id
+
+    API->>Cache: 检查缓存<br/>Key: bi:merchant_123:sales:7d
 
     alt 缓存命中
         Cache-->>API: 返回缓存数据
         API-->>CLI: 返回结果
     else 缓存未命中
-        API->>Agg: 请求数据聚合
-        Agg->>OC: 获取订单数据
-        OC-->>Agg: 返回原始数据
-        Agg->>Agg: 数据清洗
-        Agg->>Agg: 指标计算
-        Agg->>Agg: 数据格式化
-        Agg-->>API: 返回结构化数据
-        API->>Cache: 写入缓存
-        API-->>CLI: 返回结果
+        API->>DB: SELECT * FROM orders<br/>WHERE merchant_id = 'merchant_123'<br/>AND created_at >= NOW() - INTERVAL '7 days'
+        DB-->>API: 订单数据
+        API->>API: 数据聚合计算<br/>- 总销售额<br/>- 订单数量<br/>- 客单价
+        API->>Cache: 写入缓存 (TTL: 5min)
+        API-->>CLI: 返回结构化结果
     end
 ```
 
 ### 3.4 数据模型
 
-#### 3.4.1 聚合数据表
+#### 3.4.1 复用 commerce-backend 数据表
 
-**sales_daily_agg** - 每日销售聚合
+**bi-backend 不创建新表**，直接查询 commerce-backend 的现有表（只读访问）：
+
+**核心数据表**：
 ```sql
-CREATE TABLE sales_daily_agg (
-    id SERIAL PRIMARY KEY,
-    merchant_id VARCHAR(50) NOT NULL,
-    date DATE NOT NULL,
-    total_revenue DECIMAL(12, 2) NOT NULL,
-    total_orders INT NOT NULL,
-    average_order_value DECIMAL(10, 2) NOT NULL,
-    total_items INT NOT NULL,
-    unique_customers INT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(merchant_id, date)
-);
+-- 订单数据（来自 commerce-backend）
+orders (
+    id, merchant_id, order_number,
+    customer_user_id, customer_email, customer_name,
+    status, -- pending/paid/processing/shipped/delivered/cancelled/refunded
+    subtotal, shipping_fee, tax_amount, amount_total, currency,
+    product_base_currency, stripe_settlement_currency,
+    shipping_address, -- JSON: {country, city, ...}
+    utm_source, utm_campaign, gclid,
+    created_at, shipped_at, delivered_at,
+    delivery_confirmed_at, transfer_status
+)
 
-CREATE INDEX idx_sales_daily_merchant_date ON sales_daily_agg(merchant_id, date);
+order_items (
+    id, order_id, product_id, variant_id,
+    product_name, quantity, price, total
+)
+
+-- 商品数据
+products (
+    id, merchant_id, name, sku,
+    price, original_price, currency,
+    stock_quantity, low_stock_threshold,
+    status, -- draft/active/inactive/archived
+    tags, -- JSONB
+    parent_product_id, variant_attributes, -- 变体支持
+    created_at, updated_at
+)
+
+-- 商户数据
+merchants (
+    id, user_id, name, slug,
+    stripe_account_id, platform_fee_percentage,
+    transfer_delay_days, require_delivery_confirmation,
+    created_at
+)
+
+-- 转账数据
+merchant_transfers (
+    id, merchant_id, order_id,
+    gross_amount, platform_fee, net_amount,
+    status, -- pending/completed/failed
+    stripe_transfer_id,
+    created_at, completed_at
+)
+
+-- 其他相关表
+reviews (product_id, merchant_id, rating, comment)
+subscriptions (merchant_id, plan, status, started_at)
+inventory_logs (product_id, quantity_change, reason)
+order_status_history (order_id, from_status, to_status, changed_at)
 ```
 
-**customer_segment_agg** - 客户分层聚合
-```sql
-CREATE TABLE customer_segment_agg (
-    id SERIAL PRIMARY KEY,
-    merchant_id VARCHAR(50) NOT NULL,
-    customer_id VARCHAR(50) NOT NULL,
-    segment VARCHAR(20) NOT NULL, -- new, repeat, churned, vip
-    total_revenue DECIMAL(12, 2) NOT NULL,
-    order_count INT NOT NULL,
-    first_order_date DATE,
-    last_order_date DATE,
-    calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(merchant_id, customer_id)
-);
+**查询示例**：
+```python
+# 销售数据查询
+orders_query = (
+    select(
+        func.sum(Order.amount_total).label('total_revenue'),
+        func.count(Order.id).label('total_orders'),
+        func.avg(Order.amount_total).label('average_order_value')
+    )
+    .where(Order.merchant_id == merchant_id)
+    .where(Order.status == 'paid')
+    .where(Order.created_at >= start_date)
+)
 
-CREATE INDEX idx_customer_segment_merchant ON customer_segment_agg(merchant_id, segment);
-```
-
-**inventory_snapshot** - 库存快照
-```sql
-CREATE TABLE inventory_snapshot (
-    id SERIAL PRIMARY KEY,
-    merchant_id VARCHAR(50) NOT NULL,
-    product_id VARCHAR(50) NOT NULL,
-    current_stock INT NOT NULL,
-    safety_stock INT NOT NULL,
-    last_30days_sales INT NOT NULL,
-    turnover_rate DECIMAL(8, 2),
-    status VARCHAR(20), -- low, out, overstock, normal
-    snapshot_date DATE NOT NULL,
-    UNIQUE(merchant_id, product_id, snapshot_date)
-);
+# 商品销售排行
+top_products = (
+    select(
+        OrderItem.product_name,
+        func.sum(OrderItem.total).label('revenue'),
+        func.sum(OrderItem.quantity).label('quantity')
+    )
+    .join(Order)
+    .where(Order.merchant_id == merchant_id)
+    .where(Order.status == 'paid')
+    .group_by(OrderItem.product_name)
+    .order_by(desc('revenue'))
+    .limit(10)
+)
 ```
 
 ### 3.5 缓存策略
@@ -488,21 +563,43 @@ bi:merchant_123:customers:30d_all
 - 数据更新时主动失效
 - 定时任务批量更新
 
-### 3.6 数据同步
+### 3.6 查询优化策略
 
-**同步任务**：
-```mermaid
-graph LR
-    A[定时任务] -->|每5分钟| B[增量同步]
-    A -->|每天凌晨| C[全量聚合]
-    B --> D[更新缓存]
-    C --> E[重建聚合表]
-```
+**无需数据同步**：
+- bi-backend 直接查询 commerce-backend 数据库
+- 所有查询都是实时的，无延迟
+- 通过 Redis 缓存提升性能
 
-**同步策略**：
-- **实时数据**：通过 API 实时查询
-- **聚合数据**：定时任务增量计算
-- **历史数据**：每日全量聚合
+**优化方式**：
+1. **利用现有索引**：
+   ```sql
+   -- commerce-backend 已有的索引
+   CREATE INDEX idx_orders_merchant_created ON orders(merchant_id, created_at);
+   CREATE INDEX idx_orders_status ON orders(status);
+   CREATE INDEX idx_order_items_product ON order_items(product_id);
+   ```
+
+2. **只读副本**（可选）：
+   - 如果查询压力大，可使用 PostgreSQL 读写分离
+   - bi-backend 连接到只读副本，不影响主库性能
+
+3. **物化视图**（Phase 2）：
+   - 对于复杂聚合查询，可创建物化视图
+   - 例如：每日销售汇总、商品销售排行
+   ```sql
+   CREATE MATERIALIZED VIEW daily_sales_summary AS
+   SELECT
+       merchant_id,
+       date_trunc('day', created_at) as date,
+       sum(amount_total) as revenue,
+       count(*) as order_count
+   FROM orders
+   WHERE status = 'paid'
+   GROUP BY merchant_id, date;
+
+   -- 每小时刷新一次
+   REFRESH MATERIALIZED VIEW daily_sales_summary;
+   ```
 
 ### 3.7 性能优化
 
@@ -593,70 +690,84 @@ version: '3.8'
 
 services:
   bi-backend:
-    build: ./bi-backend
+    build: ./packages/bi-backend
     ports:
-      - "3000:3000"
+      - "8281:8000"
     environment:
-      DATABASE_URL: postgresql://user:pass@postgres:5432/optima_bi
-      REDIS_URL: redis://redis:6379
-      OPTIMA_API_URL: https://api.optima.com
-    depends_on:
-      - postgres
-      - redis
+      # 连接到 commerce-backend 数据库（只读）
+      DATABASE_URL: postgresql://commerce_readonly:pass@commerce-db:5432/commerce
 
-  postgres:
-    image: postgres:14
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    environment:
-      POSTGRES_DB: optima_bi
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: pass
+      # Redis 缓存
+      REDIS_URL: redis://redis:6379/2
+
+      # OAuth 认证服务
+      AUTH_BASE_URL: https://auth.optima.chat
+      AUTH_CLIENT_ID: bi-backend-client
+      AUTH_CLIENT_SECRET: ${AUTH_CLIENT_SECRET}
+
+      # 应用配置
+      APP_ENV: production
+      LOG_LEVEL: info
+    depends_on:
+      - redis
+    # 注意：不需要独立的 postgres，直接连接 commerce-backend 的数据库
 
   redis:
-    image: redis:7
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
     volumes:
       - redis_data:/data
-
-  worker:
-    build: ./bi-backend
-    command: npm run worker
-    environment:
-      DATABASE_URL: postgresql://user:pass@postgres:5432/optima_bi
-      REDIS_URL: redis://redis:6379
-    depends_on:
-      - postgres
-      - redis
+    command: redis-server --appendonly yes
 
 volumes:
-  postgres_data:
   redis_data:
 ```
+
+**说明**：
+- bi-backend 连接到 commerce-backend 的 PostgreSQL（只读用户）
+- 使用独立的 Redis 实例进行缓存
+- 不需要独立的数据库，避免数据同步问题
 
 ### 5.2 环境变量
 
 **bi-backend .env**：
 ```env
-NODE_ENV=production
-PORT=3000
+# Application
+APP_ENV=production
+PORT=8000
+LOG_LEVEL=info
 
-# Database
-DATABASE_URL=postgresql://user:pass@localhost:5432/optima_bi
+# Database (只读连接到 commerce-backend)
+DATABASE_URL=postgresql://commerce_readonly:readonly_pass@localhost:8282/commerce
+DB_POOL_SIZE=10
+DB_MAX_OVERFLOW=20
 
 # Redis
-REDIS_URL=redis://localhost:6379
-
-# Optima Commerce
-OPTIMA_API_URL=https://api.optima.com
-OPTIMA_API_KEY=your_api_key
-
-# Cache
+REDIS_URL=redis://localhost:6380/2
 CACHE_TTL=300
-CACHE_MAX_SIZE=1000
+
+# OAuth Authentication (user-auth service)
+AUTH_BASE_URL=https://auth.optima.chat
+AUTH_CLIENT_ID=bi-backend-client
+AUTH_CLIENT_SECRET=your_secret_here
 
 # Rate Limiting
-RATE_LIMIT_WINDOW=60000
+RATE_LIMIT_WINDOW=60
 RATE_LIMIT_MAX=100
+
+# CORS
+CORS_ORIGINS=["https://app.optima.chat", "http://localhost:3000"]
+```
+
+**数据库只读用户创建**：
+```sql
+-- 在 commerce-backend PostgreSQL 中创建只读用户
+CREATE USER commerce_readonly WITH PASSWORD 'readonly_pass';
+GRANT CONNECT ON DATABASE commerce TO commerce_readonly;
+GRANT USAGE ON SCHEMA public TO commerce_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO commerce_readonly;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO commerce_readonly;
 ```
 
 ## 6. 监控与日志
@@ -669,39 +780,44 @@ RATE_LIMIT_MAX=100
 - 错误率
 
 ### 6.2 日志规范
-```typescript
-// 结构化日志
-logger.info('sales_query', {
-  merchantId: 'merchant_123',
-  period: '7d',
-  executionTime: 234,
-  cacheHit: true
-});
+```python
+# 使用 structlog 记录结构化日志
+logger.info(
+    "sales_query",
+    merchant_id="merchant_123",
+    period="7d",
+    execution_time_ms=234,
+    cache_hit=True
+)
 
-logger.error('api_error', {
-  endpoint: '/api/v1/sales',
-  error: 'Database connection failed',
-  stack: error.stack
-});
+logger.error(
+    "api_error",
+    endpoint="/api/v1/sales",
+    error="Database connection failed",
+    exc_info=True
+)
 ```
 
 ## 7. 安全设计
 
 ### 7.1 认证授权
-- API Key 认证
-- 商家数据隔离
-- 权限验证
+- **OAuth 2.0 认证**：使用 user-auth 服务统一认证
+- **商家数据隔离**：自动基于 merchant_id 过滤数据
+- **只读权限**：数据库用户只有 SELECT 权限，无法修改数据
+- **Token 验证**：每个请求都验证 OAuth token 有效性
 
 ### 7.2 数据安全
-- 敏感数据加密存储
-- API 传输使用 HTTPS
-- SQL 注入防护
-- 请求频率限制
+- **HTTPS 传输**：所有 API 调用使用 HTTPS
+- **SQL 注入防护**：使用 SQLAlchemy ORM，参数化查询
+- **请求频率限制**：防止 API 滥用（slowapi 库）
+- **只读访问**：bi-backend 无法修改 commerce 数据，降低风险
 
 ### 7.3 隐私保护
-- 客户信息脱敏
-- 数据访问审计
-- GDPR 合规
+- **客户信息脱敏**：
+  - 邮箱部分隐藏：`user****@example.com`
+  - 手机号部分隐藏：`138****5678`
+- **数据访问审计**：记录所有 BI 查询日志
+- **GDPR 合规**：遵循数据访问最小化原则
 
 ## 8. 测试策略
 
@@ -723,38 +839,91 @@ logger.error('api_error', {
 ## 9. 开发规范
 
 ### 9.1 代码规范
-- TypeScript strict mode
-- ESLint + Prettier
-- Git commit 规范
+- **Python**：遵循 PEP 8 规范
+- **Linting**：ruff（现代化的 Python linter）
+- **Formatting**：black（代码格式化）
+- **Type Checking**：mypy（类型检查）
+- **Git Commit**：Conventional Commits 规范
 
 ### 9.2 API 规范
 - RESTful 设计
-- 统一响应格式
+- 统一响应格式（Pydantic models）
 - 错误码标准化
+- OpenAPI 自动生成（FastAPI 内置）
 
 ### 9.3 文档规范
-- API 文档（OpenAPI）
-- CLI 命令文档
-- 架构决策记录（ADR）
+- **API 文档**：FastAPI 自动生成（/docs）
+- **CLI 命令文档**：`bi-cli --help`
+- **架构决策记录**（ADR）：docs/adr/
+
+### 9.4 项目结构
+```
+optima-bi/
+├── packages/
+│   ├── bi-cli/              # Python CLI 工具
+│   │   ├── bi_cli/
+│   │   │   ├── __init__.py
+│   │   │   ├── cli.py       # Click/Typer CLI 入口
+│   │   │   ├── commands/    # 各个命令实现
+│   │   │   ├── client.py    # HTTP 客户端
+│   │   │   └── config.py    # 配置管理
+│   │   ├── tests/
+│   │   ├── pyproject.toml
+│   │   └── README.md
+│   │
+│   └── bi-backend/          # FastAPI 后端服务
+│       ├── src/
+│       │   ├── api/         # API 路由
+│       │   │   ├── sales.py
+│       │   │   ├── customers.py
+│       │   │   ├── inventory.py
+│       │   │   ├── finance.py
+│       │   │   └── logistics.py
+│       │   ├── services/    # 业务逻辑
+│       │   │   ├── sales_service.py
+│       │   │   ├── customer_service.py
+│       │   │   └── cache_service.py
+│       │   ├── models/      # 复用 commerce-backend 模型
+│       │   │   └── __init__.py
+│       │   ├── schemas/     # Pydantic schemas
+│       │   ├── middleware/  # OAuth 认证等
+│       │   └── core/        # 配置、数据库连接
+│       ├── tests/
+│       ├── pyproject.toml
+│       ├── Dockerfile
+│       └── README.md
+├── docs/                    # 文档
+├── docker-compose.yml
+└── README.md
+```
 
 ## 10. 附录
 
 ### 10.1 技术选型理由
 
-**为什么选择 Node.js**：
-- 与 Optima 现有技术栈一致
-- 异步 I/O 适合数据密集型应用
-- 丰富的生态系统
+**为什么选择 Python + FastAPI**：
+- **技术栈统一**：与 commerce-backend 保持一致，便于团队协作
+- **模型复用**：直接复用 commerce-backend 的 SQLAlchemy 模型
+- **开发效率**：FastAPI 提供自动 API 文档、数据验证
+- **性能优异**：FastAPI 基于 Starlette 和 Pydantic，性能接近 Node.js
+- **类型安全**：Python 3.11+ 类型提示 + Pydantic 验证
+
+**为什么直接连接数据库而非 API**：
+- **性能更优**：避免 HTTP 调用开销，SQL 查询更高效
+- **无需同步**：实时数据，无延迟
+- **灵活查询**：可以自由组合 SQL 查询，满足复杂分析需求
+- **简化架构**：减少一层 API 调用，降低系统复杂度
 
 **为什么选择 PostgreSQL**：
-- 强大的聚合查询能力
-- 支持 JSON 数据类型
-- 成熟的分区和索引功能
+- **已有基础**：commerce-backend 使用 PostgreSQL
+- **强大的聚合查询**：GROUP BY、窗口函数、CTE
+- **支持 JSON/JSONB**：原生支持 JSON 数据查询
+- **成熟的分区和索引**：优化大数据量查询
 
 **为什么选择 Redis**：
-- 高性能缓存
-- 支持复杂数据结构
-- 持久化能力
+- **高性能缓存**：亚毫秒级响应
+- **灵活的数据结构**：String、Hash、Set、Sorted Set
+- **TTL 支持**：自动过期清理
 
 ### 10.2 扩展性考虑
 
