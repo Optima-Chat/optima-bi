@@ -160,10 +160,10 @@ SELECT
     toDecimal64(amount_shipping, 2) AS amount_shipping,
     toDecimal64(amount_total, 2) AS amount_total,
     currency,
-    parseDateTimeBestEffort(created_at) AS created_at,
-    parseDateTimeBestEffort(updated_at) AS updated_at,
-    if(notEmpty(cancelled_at), parseDateTimeBestEffort(cancelled_at), NULL) AS cancelled_at,
-    if(notEmpty(fulfilled_at), parseDateTimeBestEffort(fulfilled_at), NULL) AS fulfilled_at,
+    toDateTime(toInt64(created_at) / 1000000) AS created_at,
+    toDateTime(toInt64(updated_at) / 1000000) AS updated_at,
+    if(notEmpty(cancelled_at), toDateTime(toInt64(cancelled_at) / 1000000), NULL) AS cancelled_at,
+    if(notEmpty(fulfilled_at), toDateTime(toInt64(fulfilled_at) / 1000000), NULL) AS fulfilled_at,
     0 AS _kafka_offset,
     0 AS _kafka_partition,
     now() AS _kafka_timestamp
@@ -198,8 +198,8 @@ SELECT
     toInt32(quantity) AS quantity,
     toDecimal64(price, 2) AS price,
     toDecimal64(total, 2) AS total,
-    parseDateTimeBestEffort(created_at) AS created_at,
-    parseDateTimeBestEffort(updated_at) AS updated_at,
+    toDateTime(toInt64(created_at) / 1000000) AS created_at,
+    toDateTime(toInt64(updated_at) / 1000000) AS updated_at,
     0 AS _kafka_offset,
     0 AS _kafka_partition,
     now() AS _kafka_timestamp
@@ -236,8 +236,8 @@ SELECT
     if(notEmpty(cost), toDecimal64(cost, 2), NULL) AS cost,
     toInt32(inventory_quantity) AS inventory_quantity,
     status,
-    parseDateTimeBestEffort(created_at) AS created_at,
-    parseDateTimeBestEffort(updated_at) AS updated_at,
+    toDateTime(toInt64(created_at) / 1000000) AS created_at,
+    toDateTime(toInt64(updated_at) / 1000000) AS updated_at,
     0 AS _kafka_offset,
     0 AS _kafka_partition,
     now() AS _kafka_timestamp
@@ -270,8 +270,8 @@ SELECT
     first_name,
     last_name,
     phone,
-    parseDateTimeBestEffort(created_at) AS created_at,
-    parseDateTimeBestEffort(updated_at) AS updated_at,
+    toDateTime(toInt64(created_at) / 1000000) AS created_at,
+    toDateTime(toInt64(updated_at) / 1000000) AS updated_at,
     0 AS _kafka_offset,
     0 AS _kafka_partition,
     now() AS _kafka_timestamp
@@ -300,8 +300,8 @@ SELECT
     name,
     email,
     status,
-    parseDateTimeBestEffort(created_at) AS created_at,
-    parseDateTimeBestEffort(updated_at) AS updated_at,
+    toDateTime(toInt64(created_at) / 1000000) AS created_at,
+    toDateTime(toInt64(updated_at) / 1000000) AS updated_at,
     0 AS _kafka_offset,
     0 AS _kafka_partition,
     now() AS _kafka_timestamp
@@ -318,7 +318,7 @@ CREATE TABLE IF NOT EXISTS daily_sales_mv (
     total_revenue AggregateFunction(sum, Decimal(10, 2)),
     order_count AggregateFunction(count, UUID),
     avg_order_value AggregateFunction(avg, Decimal(10, 2)),
-    unique_customers AggregateFunction(uniq, String)
+    unique_customers AggregateFunction(uniq, Nullable(String))
 )
 ENGINE = AggregatingMergeTree()
 PARTITION BY toYYYYMM(date)
@@ -424,8 +424,8 @@ CREATE TABLE IF NOT EXISTS merchant_overview_mv (
     date Date,
     total_revenue AggregateFunction(sum, Decimal(10, 2)),
     order_count AggregateFunction(count, UUID),
-    unique_customers AggregateFunction(uniq, String),
-    active_products AggregateFunction(uniq, UUID)
+    unique_customers AggregateFunction(uniq, Nullable(String)),
+    active_products AggregateFunction(uniq, Nullable(UUID))
 )
 ENGINE = AggregatingMergeTree()
 PARTITION BY toYYYYMM(date)

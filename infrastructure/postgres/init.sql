@@ -145,8 +145,8 @@ BEGIN
         VALUES (
             order_id,
             CASE
-                WHEN merchant_id = '11111111-1111-1111-1111-111111111111' THEN 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-                ELSE 'cccccccc-cccc-cccc-cccc-cccccccccccc'
+                WHEN merchant_id = '11111111-1111-1111-1111-111111111111' THEN 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::UUID
+                ELSE 'cccccccc-cccc-cccc-cccc-cccccccccccc'::UUID
             END,
             CASE
                 WHEN merchant_id = '11111111-1111-1111-1111-111111111111' THEN 'iPhone 15 Pro'

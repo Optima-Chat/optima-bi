@@ -9,8 +9,6 @@ services:
       POSTGRES_DB: commerce
       POSTGRES_USER: commerce_user
       POSTGRES_PASSWORD: commerce_password
-      # 启用逻辑复制
-      POSTGRES_INITDB_ARGS: "-c wal_level=logical"
     command:
       - postgres
       - -c
@@ -20,7 +18,7 @@ services:
       - -c
       - max_wal_senders=10
     ports:
-      - "5432:5432"
+      - "7280:5432"  # PostgreSQL
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -33,12 +31,10 @@ services:
     container_name: optima-bi-clickhouse
     environment:
       CLICKHOUSE_DB: bi
-      CLICKHOUSE_USER: bi_user
-      CLICKHOUSE_PASSWORD: bi_password
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ports:
-      - "8123:8123"  # HTTP API
-      - "9000:9000"  # Native protocol
+      - "7281:8123"  # ClickHouse HTTP API
+      - "7282:9000"  # ClickHouse Native protocol
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./infrastructure/clickhouse/config.xml:/etc/clickhouse-server/config.d/logging.xml
@@ -59,7 +55,7 @@ services:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
     ports:
-      - "2181:2181"
+      - "7285:2181"  # Zookeeper
     volumes:
       - zookeeper_data:/var/lib/zookeeper/data
       - zookeeper_logs:/var/lib/zookeeper/log
@@ -82,8 +78,8 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_LOG_RETENTION_HOURS: 168  # 7 天
     ports:
-      - "9092:9092"
-      - "29092:29092"
+      - "7283:9092"   # Kafka
+      - "7284:29092"  # Kafka external
     volumes:
       - kafka_data:/var/lib/kafka/data
     networks:
@@ -100,7 +96,7 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
     ports:
-      - "8080:8080"
+      - "7286:8080"  # Kafka UI
     networks:
       - optima-bi
 
@@ -122,7 +118,7 @@ services:
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
     ports:
-      - "8083:8083"
+      - "7287:8083"  # Debezium
     networks:
       - optima-bi
 
@@ -132,7 +128,7 @@ services:
     container_name: optima-bi-redis
     command: redis-server --appendonly yes --requirepass redis_password
     ports:
-      - "6379:6379"
+      - "7288:6379"  # Redis
     volumes:
       - redis_data:/data
     networks:

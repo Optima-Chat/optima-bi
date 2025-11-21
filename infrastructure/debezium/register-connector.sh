@@ -13,7 +13,7 @@ RETRY_INTERVAL=5
 retry_count=0
 
 while [ $retry_count -lt $MAX_RETRIES ]; do
-    if curl -s http://localhost:8083/ > /dev/null 2>&1; then
+    if curl -s http://localhost:7287/ > /dev/null 2>&1; then
         echo "✅ Debezium Connect 已就绪"
         break
     fi
@@ -32,7 +32,7 @@ echo ""
 echo "注册 PostgreSQL CDC 连接器..."
 
 curl -i -X POST \
-  http://localhost:8083/connectors/ \
+  http://localhost:7287/connectors/ \
   -H "Content-Type: application/json" \
   -d '{
   "name": "postgres-commerce-connector",
@@ -69,4 +69,4 @@ echo ""
 echo "连接器注册完成！"
 echo ""
 echo "查看连接器状态："
-echo "curl http://localhost:8083/connectors/postgres-commerce-connector/status | jq"
+echo "curl http://localhost:7287/connectors/postgres-commerce-connector/status | jq"
