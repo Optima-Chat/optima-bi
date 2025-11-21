@@ -496,11 +496,11 @@ Claude Code:
 - 商家已开通 Optima Commerce 账号
 
 ### 9.2 技术依赖
-- **Python 3.11+**（与 commerce-backend 保持一致）
+- **Node.js 18+** (TypeScript)
 - **PostgreSQL 14+**（直接连接 commerce-backend 数据库，只读访问）
 - **Redis 7+**（缓存查询结果）
-- **FastAPI**（与 commerce-backend 保持一致的技术栈）
-- **SQLAlchemy 2.0**（复用 commerce-backend 的数据模型）
+- **Fastify/Express**（高性能 TypeScript 后端框架）
+- **Prisma/TypeORM**（TypeScript ORM，定义数据模型）
 
 ## 10. 附录
 

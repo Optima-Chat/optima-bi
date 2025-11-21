@@ -13,7 +13,7 @@ graph TB
     end
 
     subgraph "CLI 层 - 数据获取层"
-        B -->|执行命令| C[bi-cli<br/>Python CLI]
+        B -->|执行命令| C[bi-cli<br/>Node.js CLI<br/>TypeScript]
         C -->|sales get| C1[销售数据]
         C -->|customer get| C2[客户数据]
         C -->|inventory get| C3[库存数据]
@@ -23,7 +23,7 @@ graph TB
     end
 
     subgraph "后端服务层 - 数据查询层"
-        C -->|HTTP/REST| D[bi-backend<br/>FastAPI]
+        C -->|HTTP/REST| D[bi-backend<br/>Fastify/Express<br/>TypeScript]
         D1[OAuth 认证] --> D
         D2[查询服务] --> D
         D3[聚合计算] --> D
@@ -58,8 +58,8 @@ graph TB
 
 **职责分离**：
 - **Claude Code**：负责 AI 分析、洞察生成、建议输出
-- **bi-cli**：负责数据获取、结构化输出（Python CLI）
-- **bi-backend**：负责数据查询、聚合计算、缓存（FastAPI）
+- **bi-cli**：负责数据获取、结构化输出（TypeScript CLI）
+- **bi-backend**：负责数据查询、聚合计算、缓存（Fastify + TypeScript）
 - **commerce-backend DB**：数据源（只读访问）
 
 **数据流向**：
@@ -69,9 +69,9 @@ commerce DB → bi-backend → bi-cli → Claude Code → 商家
 ```
 
 **关键设计决策**：
-1. **技术栈统一**：bi-backend 使用 Python + FastAPI，与 commerce-backend 保持一致
+1. **技术栈选择**：全栈 TypeScript（Node.js），统一前后端技术栈
 2. **直接数据库访问**：bi-backend 直接连接 commerce-backend PostgreSQL（只读），避免 API 调用开销
-3. **模型复用**：直接复用 commerce-backend 的 SQLAlchemy 模型定义
+3. **数据模型定义**：使用 Prisma/TypeORM 重新定义 TypeScript 数据模型（映射 commerce-backend 表结构）
 4. **无需数据同步**：实时查询源数据库，无需维护聚合表
 5. **OAuth 统一**：使用 user-auth 服务进行统一认证
 6. **缓存优化**：使用 Redis 缓存查询结果，减少数据库负载
@@ -79,12 +79,12 @@ commerce DB → bi-backend → bi-cli → Claude Code → 商家
 ## 2. bi-cli 设计
 
 ### 2.1 技术栈
-- **语言**：Python 3.11+
-- **CLI 框架**：Click 或 Typer（现代化 Python CLI）
-- **HTTP 客户端**：httpx（异步支持）
-- **数据验证**：Pydantic v2（与 FastAPI 一致）
-- **配置管理**：pydantic-settings
-- **测试**：pytest
+- **语言**：TypeScript + Node.js 18+
+- **CLI 框架**：Commander.js 或 oclif
+- **HTTP 客户端**：axios 或 ky（支持重试和拦截器）
+- **数据验证**：zod（TypeScript-first schema validation）
+- **配置管理**：cosmiconfig + dotenv
+- **测试**：vitest 或 jest
 
 ### 2.2 命令设计
 
@@ -429,33 +429,115 @@ bi-cli customer get --merchant-id merchant_xxx --segment all
 ## 3. bi-backend 设计
 
 ### 3.1 技术栈
-- **语言**：Python 3.11+
-- **框架**：FastAPI（与 commerce-backend 一致）
-- **ORM**：SQLAlchemy 2.0（复用 commerce-backend 模型）
+- **语言**：TypeScript + Node.js 18+
+- **框架**：Fastify 或 Express.js
+  - **推荐 Fastify**：更快的性能，内置 schema validation，TypeScript 友好
+- **ORM**：Prisma（推荐）或 TypeORM
+  - **推荐 Prisma**：类型安全、优秀的 DX、自动生成类型
 - **数据库**：PostgreSQL 14+（只读连接到 commerce-backend 数据库）
-- **缓存**：Redis 7+
-- **HTTP 客户端**：httpx（用于调用 user-auth）
-- **测试**：pytest（与 commerce-backend 一致）
+- **缓存**：Redis 7+ (ioredis 客户端)
+- **HTTP 客户端**：axios（用于调用 user-auth）
+- **数据验证**：zod（与 Fastify 集成）
+- **测试**：vitest（快速、兼容 Vite 生态）
 - **部署**：Docker + Docker Compose
 
-### 3.1.1 模型复用策略
-bi-backend 直接复用 commerce-backend 的 SQLAlchemy 模型：
-- **方式1**：Git submodule 引用 commerce-backend/src/models
-- **方式2**：Python package 依赖（将 commerce-backend models 发布为独立包）
-- **方式3**：直接复制模型文件（初期快速开发）
+### 3.1.1 数据模型定义策略
 
-**复用的核心模型**：
-```python
-from commerce_backend.models import (
-    Order, OrderItem,          # 订单数据
-    Product,                    # 商品数据
-    Merchant,                   # 商户数据
-    MerchantTransfer,          # 转账数据
-    Subscription,              # 订阅数据
-    Review,                    # 评价数据
-    InventoryLog,              # 库存日志
-    OrderStatusHistory,        # 订单状态历史
-)
+**方案选择：Prisma（推荐）**
+
+使用 Prisma 从现有 commerce-backend 数据库生成 schema：
+
+```bash
+# 1. 从数据库内省生成 Prisma schema
+npx prisma db pull --url="postgresql://readonly_user:pass@localhost:5432/commerce"
+
+# 2. 生成 TypeScript 类型
+npx prisma generate
+```
+
+**生成的 Prisma Schema 示例**：
+```prisma
+// schema.prisma
+model Order {
+  id                String   @id @default(uuid())
+  merchantId        String   @map("merchant_id")
+  orderNumber       String   @unique @map("order_number")
+  customerUserId    String?  @map("customer_user_id")
+  customerEmail     String   @map("customer_email")
+  customerName      String   @map("customer_name")
+  status            String   // pending, paid, shipped, delivered, etc.
+  subtotal          Decimal  @db.Decimal(10, 2)
+  shippingFee       Decimal  @map("shipping_fee") @db.Decimal(10, 2)
+  amountTotal       Decimal  @map("amount_total") @db.Decimal(10, 2)
+  currency          String
+  shippingAddress   Json     @map("shipping_address")
+  createdAt         DateTime @default(now()) @map("created_at")
+  deliveredAt       DateTime? @map("delivered_at")
+
+  merchant          Merchant @relation(fields: [merchantId], references: [id])
+  items             OrderItem[]
+
+  @@map("orders")
+  @@index([merchantId, createdAt])
+}
+
+model OrderItem {
+  id           String  @id @default(uuid())
+  orderId      String  @map("order_id")
+  productId    String  @map("product_id")
+  productName  String  @map("product_name")
+  quantity     Int
+  price        Decimal @db.Decimal(10, 2)
+  total        Decimal @db.Decimal(10, 2)
+
+  order        Order   @relation(fields: [orderId], references: [id])
+
+  @@map("order_items")
+}
+
+model Merchant {
+  id          String   @id @default(uuid())
+  userId      String   @unique @map("user_id")
+  name        String
+  slug        String?  @unique
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  orders      Order[]
+  products    Product[]
+
+  @@map("merchants")
+}
+
+// ... 其他模型
+```
+
+**使用 Prisma Client 查询**：
+```typescript
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient({
+  datasources: {
+    db: {
+      url: process.env.DATABASE_URL
+    }
+  }
+});
+
+// 类型安全的查询
+const orders = await prisma.order.findMany({
+  where: {
+    merchantId: 'merchant_123',
+    status: 'paid',
+    createdAt: {
+      gte: new Date('2024-01-01')
+    }
+  },
+  include: {
+    items: true,
+    merchant: true
+  }
+});
 ```
 
 ### 3.2 API 设计
@@ -474,9 +556,72 @@ Headers:
 **认证流程**：
 1. bi-cli 从配置文件读取 OAuth token（商家通过 optima auth login 获得）
 2. bi-cli 请求 bi-backend 时携带 `Authorization: Bearer <token>` header
-3. bi-backend 使用 FastAPI Dependency 调用 user-auth 验证 token
+3. bi-backend 使用 Fastify preHandler 或 Express middleware 调用 user-auth 验证 token
 4. 验证通过后，根据 user_id 查询 `merchants` 表获取 `merchant_id`
 5. 所有 BI 查询都自动限定在该商家的数据范围内
+
+**TypeScript 实现示例**：
+```typescript
+// src/middleware/auth.ts
+import { FastifyRequest, FastifyReply } from 'fastify';
+import axios from 'axios';
+import { prisma } from '../db';
+
+interface UserInfo {
+  userId: string;
+  role: 'merchant' | 'admin';
+  permissions: string[];
+}
+
+declare module 'fastify' {
+  interface FastifyRequest {
+    user: UserInfo & { merchantId?: string };
+  }
+}
+
+export async function authMiddleware(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
+  const token = request.headers.authorization?.replace('Bearer ', '');
+
+  if (!token) {
+    return reply.code(401).send({ error: 'Unauthorized' });
+  }
+
+  try {
+    // 调用 user-auth 验证 token
+    const { data } = await axios.get(
+      `${process.env.AUTH_BASE_URL}/api/v1/auth/verify`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    const userInfo: UserInfo = {
+      userId: data.user_id,
+      role: data.role,
+      permissions: data.permissions || []
+    };
+
+    // 如果是商家，查询 merchant_id
+    if (userInfo.role === 'merchant') {
+      const merchant = await prisma.merchant.findUnique({
+        where: { userId: userInfo.userId },
+        select: { id: true }
+      });
+
+      if (!merchant) {
+        return reply.code(404).send({ error: 'Merchant not found' });
+      }
+
+      request.user = { ...userInfo, merchantId: merchant.id };
+    } else {
+      request.user = userInfo;
+    }
+  } catch (error) {
+    return reply.code(401).send({ error: 'Invalid token' });
+  }
+}
+```
 
 #### 3.2.2 销售数据 API
 ```
@@ -607,34 +752,71 @@ inventory_logs (product_id, quantity_change, reason)
 order_status_history (order_id, from_status, to_status, changed_at)
 ```
 
-**查询示例**：
-```python
-# 销售数据查询
-orders_query = (
-    select(
-        func.sum(Order.amount_total).label('total_revenue'),
-        func.count(Order.id).label('total_orders'),
-        func.avg(Order.amount_total).label('average_order_value')
-    )
-    .where(Order.merchant_id == merchant_id)
-    .where(Order.status == 'paid')
-    .where(Order.created_at >= start_date)
-)
+**Prisma 查询示例**：
+```typescript
+// 销售数据聚合查询
+const salesStats = await prisma.order.aggregate({
+  where: {
+    merchantId: merchant_id,
+    status: 'paid',
+    createdAt: {
+      gte: startDate
+    }
+  },
+  _sum: {
+    amountTotal: true
+  },
+  _count: true,
+  _avg: {
+    amountTotal: true
+  }
+});
 
-# 商品销售排行
-top_products = (
-    select(
-        OrderItem.product_name,
-        func.sum(OrderItem.total).label('revenue'),
-        func.sum(OrderItem.quantity).label('quantity')
-    )
-    .join(Order)
-    .where(Order.merchant_id == merchant_id)
-    .where(Order.status == 'paid')
-    .group_by(OrderItem.product_name)
-    .order_by(desc('revenue'))
-    .limit(10)
-)
+const result = {
+  totalRevenue: salesStats._sum.amountTotal,
+  totalOrders: salesStats._count,
+  averageOrderValue: salesStats._avg.amountTotal
+};
+
+// 商品销售排行（使用 Prisma 原生查询）
+const topProducts = await prisma.$queryRaw<Array<{
+  productName: string;
+  revenue: number;
+  quantity: number;
+}>>`
+  SELECT
+    oi.product_name as "productName",
+    SUM(oi.total) as revenue,
+    SUM(oi.quantity) as quantity
+  FROM order_items oi
+  JOIN orders o ON oi.order_id = o.id
+  WHERE o.merchant_id = ${merchant_id}
+    AND o.status = 'paid'
+  GROUP BY oi.product_name
+  ORDER BY revenue DESC
+  LIMIT 10
+`;
+
+// 或使用 Prisma 的 groupBy (如果支持)
+const topProductsByGroupBy = await prisma.orderItem.groupBy({
+  by: ['productName'],
+  where: {
+    order: {
+      merchantId: merchant_id,
+      status: 'paid'
+    }
+  },
+  _sum: {
+    total: true,
+    quantity: true
+  },
+  orderBy: {
+    _sum: {
+      total: 'desc'
+    }
+  },
+  take: 10
+});
 ```
 
 ### 3.5 缓存策略
@@ -880,22 +1062,32 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO commerce_rea
 - 错误率
 
 ### 6.2 日志规范
-```python
-# 使用 structlog 记录结构化日志
-logger.info(
-    "sales_query",
-    merchant_id="merchant_123",
-    period="7d",
-    execution_time_ms=234,
-    cache_hit=True
-)
+```typescript
+// 使用 pino 记录结构化日志
+import pino from 'pino';
 
-logger.error(
-    "api_error",
-    endpoint="/api/v1/sales",
-    error="Database connection failed",
-    exc_info=True
-)
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  transport: {
+    target: 'pino-pretty',
+    options: { colorize: true }
+  }
+});
+
+logger.info({
+  event: 'sales_query',
+  merchantId: 'merchant_123',
+  period: '7d',
+  executionTimeMs: 234,
+  cacheHit: true
+});
+
+logger.error({
+  event: 'api_error',
+  endpoint: '/api/v1/sales',
+  error: 'Database connection failed',
+  stack: error.stack
+});
 ```
 
 ## 7. 安全设计
@@ -903,10 +1095,18 @@ logger.error(
 ### 7.1 认证授权
 
 #### 7.1.1 角色定义
-```python
-class UserRole(str, Enum):
-    MERCHANT = "merchant"  # 商家角色
-    ADMIN = "admin"        # 平台管理员
+```typescript
+enum UserRole {
+  MERCHANT = 'merchant',  // 商家角色
+  ADMIN = 'admin'         // 平台管理员
+}
+
+interface CurrentUser {
+  userId: string;
+  role: UserRole;
+  merchantId?: string;
+  permissions: string[];
+}
 ```
 
 #### 7.1.2 权限矩阵
@@ -920,117 +1120,138 @@ class UserRole(str, Enum):
 | 订阅分析（platform subscription） | ❌ | ✅ |
 | 平台财务（platform revenue） | ❌ | ✅ |
 
-#### 7.1.3 认证流程
-```python
-# FastAPI Dependency
-async def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-) -> CurrentUser:
-    # 1. 调用 user-auth 验证 token
-    user_info = await verify_token(token)
+#### 7.1.3 认证流程（已在 3.2.1 中提供 TypeScript 实现）
 
-    # 2. 获取用户角色
-    role = user_info.get("role")  # merchant or admin
-    user_id = user_info.get("user_id")
-
-    # 3. 如果是商家，查询 merchant_id
-    merchant_id = None
-    if role == "merchant":
-        merchant = db.query(Merchant).filter(
-            Merchant.user_id == user_id
-        ).first()
-        if not merchant:
-            raise HTTPException(401, "Merchant not found")
-        merchant_id = merchant.id
-
-    return CurrentUser(
-        user_id=user_id,
-        role=role,
-        merchant_id=merchant_id,
-        permissions=user_info.get("permissions", [])
-    )
-```
+参见上文 3.2.1 节的 TypeScript authMiddleware 实现。
 
 #### 7.1.4 数据隔离
-```python
-# 商家查询（自动过滤）
-@router.get("/sales")
-async def get_sales(
-    days: int = 7,
-    current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    # 商家只能查看自己的数据
-    query = db.query(Order).filter(
-        Order.merchant_id == current_user.merchant_id
-    )
-    # ...
+```typescript
+// src/routes/sales.ts
+import { FastifyInstance } from 'fastify';
+import { prisma } from '../db';
+import { authMiddleware } from '../middleware/auth';
+import { requireAdmin } from '../middleware/permissions';
 
-# 平台查询（需要管理员权限）
-@router.get("/platform/overview")
-async def platform_overview(
-    current_user: CurrentUser = Depends(require_admin),  # 需要管理员
-    db: Session = Depends(get_db)
-):
-    # 查询所有商家数据
-    query = db.query(Order)  # 不过滤 merchant_id
-    # ...
+export async function salesRoutes(app: FastifyInstance) {
+  // 商家查询（自动过滤）
+  app.get('/api/v1/sales', {
+    preHandler: authMiddleware
+  }, async (request, reply) => {
+    const { days = 7 } = request.query as { days?: number };
+    const { merchantId } = request.user;
 
-# 管理员查看指定商家数据
-@router.get("/sales")
-async def get_sales(
-    merchant_id: Optional[str] = None,  # 管理员可指定
-    current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    # 如果指定了 merchant_id，验证权限
-    if merchant_id:
-        if current_user.role != "admin":
-            raise HTTPException(403, "Admin role required")
-        target_merchant_id = merchant_id
-    else:
-        # 商家默认查询自己的数据
-        target_merchant_id = current_user.merchant_id
+    // 商家只能查看自己的数据
+    const orders = await prisma.order.findMany({
+      where: {
+        merchantId,
+        status: 'paid',
+        createdAt: {
+          gte: new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+        }
+      }
+    });
 
-    query = db.query(Order).filter(
-        Order.merchant_id == target_merchant_id
-    )
-    # ...
+    return { orders };
+  });
+
+  // 平台查询（需要管理员权限）
+  app.get('/api/v1/platform/overview', {
+    preHandler: [authMiddleware, requireAdmin]
+  }, async (request, reply) => {
+    // 查询所有商家数据（不过滤 merchantId）
+    const stats = await prisma.order.aggregate({
+      where: { status: 'paid' },
+      _sum: { amountTotal: true },
+      _count: true
+    });
+
+    return { stats };
+  });
+
+  // 管理员查看指定商家数据
+  app.get('/api/v1/sales/:merchantId?', {
+    preHandler: authMiddleware
+  }, async (request, reply) => {
+    const { merchantId } = request.params as { merchantId?: string };
+    const currentUser = request.user;
+
+    // 确定目标商家 ID
+    let targetMerchantId: string;
+
+    if (merchantId) {
+      // 如果指定了 merchantId，需要管理员权限
+      if (currentUser.role !== UserRole.ADMIN) {
+        return reply.code(403).send({ error: 'Admin role required' });
+      }
+      targetMerchantId = merchantId;
+    } else {
+      // 商家默认查询自己的数据
+      targetMerchantId = currentUser.merchantId!;
+    }
+
+    const orders = await prisma.order.findMany({
+      where: { merchantId: targetMerchantId }
+    });
+
+    return { orders };
+  });
+}
 ```
 
-#### 7.1.5 权限验证装饰器
-```python
-def require_admin(
-    current_user: CurrentUser = Depends(get_current_user)
-) -> CurrentUser:
-    """要求管理员权限"""
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail="Admin role required"
-        )
-    return current_user
+#### 7.1.5 权限验证中间件
+```typescript
+// src/middleware/permissions.ts
+import { FastifyRequest, FastifyReply } from 'fastify';
+import { UserRole } from '../types';
 
-def require_permission(permission: str):
-    """要求特定权限"""
-    def dependency(
-        current_user: CurrentUser = Depends(get_current_user)
-    ) -> CurrentUser:
-        if permission not in current_user.permissions:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Permission '{permission}' required"
-            )
-        return current_user
-    return dependency
+/**
+ * 要求管理员权限
+ */
+export async function requireAdmin(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
+  if (request.user.role !== UserRole.ADMIN) {
+    return reply.code(403).send({
+      error: 'Admin role required'
+    });
+  }
+}
+
+/**
+ * 要求特定权限
+ */
+export function requirePermission(permission: string) {
+  return async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!request.user.permissions.includes(permission)) {
+      return reply.code(403).send({
+        error: `Permission '${permission}' required`
+      });
+    }
+  };
+}
+
+/**
+ * 使用示例
+ */
+app.get('/api/v1/admin/merchants', {
+  preHandler: [authMiddleware, requireAdmin]
+}, async (request, reply) => {
+  // 只有管理员能访问
+});
+
+app.get('/api/v1/sensitive-data', {
+  preHandler: [authMiddleware, requirePermission('data:read:sensitive')]
+}, async (request, reply) => {
+  // 需要特定权限
+});
 ```
 
 ### 7.2 数据安全
 - **HTTPS 传输**：所有 API 调用使用 HTTPS
-- **SQL 注入防护**：使用 SQLAlchemy ORM，参数化查询
-- **请求频率限制**：防止 API 滥用（slowapi 库）
-- **只读访问**：bi-backend 无法修改 commerce 数据，降低风险
+- **SQL 注入防护**：使用 Prisma ORM，自动参数化查询
+- **请求频率限制**：防止 API 滥用（@fastify/rate-limit）
+- **只读访问**：bi-backend 使用只读数据库用户，无法修改 commerce 数据
 
 ### 7.3 隐私保护
 - **客户信息脱敏**：
@@ -1059,20 +1280,20 @@ def require_permission(permission: str):
 ## 9. 开发规范
 
 ### 9.1 代码规范
-- **Python**：遵循 PEP 8 规范
-- **Linting**：ruff（现代化的 Python linter）
-- **Formatting**：black（代码格式化）
-- **Type Checking**：mypy（类型检查）
+- **TypeScript**：Strict mode 开启
+- **Linting**：ESLint + @typescript-eslint
+- **Formatting**：Prettier
+- **Type Checking**：TypeScript 编译器 (tsc)
 - **Git Commit**：Conventional Commits 规范
 
 ### 9.2 API 规范
 - RESTful 设计
-- 统一响应格式（Pydantic models）
+- 统一响应格式（zod schemas）
 - 错误码标准化
-- OpenAPI 自动生成（FastAPI 内置）
+- OpenAPI 自动生成（@fastify/swagger）
 
 ### 9.3 文档规范
-- **API 文档**：FastAPI 自动生成（/docs）
+- **API 文档**：Swagger/OpenAPI（/docs）
 - **CLI 命令文档**：`bi-cli --help`
 - **架构决策记录**（ADR）：docs/adr/
 
@@ -1080,36 +1301,51 @@ def require_permission(permission: str):
 ```
 optima-bi/
 ├── packages/
-│   ├── bi-cli/              # Python CLI 工具
-│   │   ├── bi_cli/
-│   │   │   ├── __init__.py
-│   │   │   ├── cli.py       # Click/Typer CLI 入口
+│   ├── bi-cli/              # TypeScript CLI 工具
+│   │   ├── src/
+│   │   │   ├── index.ts     # CLI 入口
 │   │   │   ├── commands/    # 各个命令实现
-│   │   │   ├── client.py    # HTTP 客户端
-│   │   │   └── config.py    # 配置管理
+│   │   │   │   ├── sales.ts
+│   │   │   │   ├── customer.ts
+│   │   │   │   ├── platform.ts
+│   │   │   │   └── auth.ts
+│   │   │   ├── client/      # HTTP 客户端
+│   │   │   │   └── api-client.ts
+│   │   │   ├── config/      # 配置管理
+│   │   │   │   └── config.ts
+│   │   │   └── types/       # TypeScript 类型
 │   │   ├── tests/
-│   │   ├── pyproject.toml
+│   │   ├── package.json
+│   │   ├── tsconfig.json
 │   │   └── README.md
 │   │
-│   └── bi-backend/          # FastAPI 后端服务
+│   └── bi-backend/          # Fastify 后端服务
 │       ├── src/
-│       │   ├── api/         # API 路由
-│       │   │   ├── sales.py
-│       │   │   ├── customers.py
-│       │   │   ├── inventory.py
-│       │   │   ├── finance.py
-│       │   │   └── logistics.py
+│       │   ├── routes/      # API 路由
+│       │   │   ├── sales.ts
+│       │   │   ├── customers.ts
+│       │   │   ├── inventory.ts
+│       │   │   ├── finance.ts
+│       │   │   ├── logistics.ts
+│       │   │   └── platform.ts
 │       │   ├── services/    # 业务逻辑
-│       │   │   ├── sales_service.py
-│       │   │   ├── customer_service.py
-│       │   │   └── cache_service.py
-│       │   ├── models/      # 复用 commerce-backend 模型
-│       │   │   └── __init__.py
-│       │   ├── schemas/     # Pydantic schemas
-│       │   ├── middleware/  # OAuth 认证等
-│       │   └── core/        # 配置、数据库连接
+│       │   │   ├── sales.service.ts
+│       │   │   ├── customer.service.ts
+│       │   │   └── cache.service.ts
+│       │   ├── middleware/  # 中间件
+│       │   │   ├── auth.ts
+│       │   │   └── permissions.ts
+│       │   ├── types/       # TypeScript 类型
+│       │   │   └── index.ts
+│       │   ├── db/          # 数据库配置
+│       │   │   └── prisma.ts
+│       │   ├── utils/       # 工具函数
+│       │   └── app.ts       # Fastify 应用
+│       ├── prisma/
+│       │   └── schema.prisma  # Prisma schema
 │       ├── tests/
-│       ├── pyproject.toml
+│       ├── package.json
+│       ├── tsconfig.json
 │       ├── Dockerfile
 │       └── README.md
 ├── docs/                    # 文档
@@ -1121,12 +1357,13 @@ optima-bi/
 
 ### 10.1 技术选型理由
 
-**为什么选择 Python + FastAPI**：
-- **技术栈统一**：与 commerce-backend 保持一致，便于团队协作
-- **模型复用**：直接复用 commerce-backend 的 SQLAlchemy 模型
-- **开发效率**：FastAPI 提供自动 API 文档、数据验证
-- **性能优异**：FastAPI 基于 Starlette 和 Pydantic，性能接近 Node.js
-- **类型安全**：Python 3.11+ 类型提示 + Pydantic 验证
+**为什么选择 TypeScript + Fastify**：
+- **全栈类型安全**：TypeScript 在编译时提供完整的类型检查，减少运行时错误
+- **前后端统一**：未来如需 Web 界面，可共享类型定义和业务逻辑
+- **现代生态**：Node.js 生态丰富，工具链成熟（vitest、prettier、eslint）
+- **开发效率**：Fastify 提供自动 schema validation、插件系统、自动 API 文档（@fastify/swagger）
+- **性能优异**：Fastify 是最快的 Node.js 框架之一，比 Express 快约 2 倍
+- **Prisma ORM**：类型安全的 ORM，自动生成 TypeScript 类型，优秀的开发体验
 
 **为什么直接连接数据库而非 API**：
 - **性能更优**：避免 HTTP 调用开销，SQL 查询更高效
