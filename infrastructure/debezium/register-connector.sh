@@ -3,9 +3,32 @@
 # Debezium Connector 注册脚本
 # 等待 Debezium Connect 启动后注册 PostgreSQL CDC 连接器
 
-echo "等待 Debezium Connect 启动..."
-sleep 30
+set -e
 
+echo "等待 Debezium Connect 启动..."
+
+# 健康检查：循环等待直到 Debezium Connect 就绪
+MAX_RETRIES=30
+RETRY_INTERVAL=5
+retry_count=0
+
+while [ $retry_count -lt $MAX_RETRIES ]; do
+    if curl -s http://localhost:8083/ > /dev/null 2>&1; then
+        echo "✅ Debezium Connect 已就绪"
+        break
+    fi
+
+    retry_count=$((retry_count + 1))
+    echo "⏳ 等待 Debezium Connect 启动... ($retry_count/$MAX_RETRIES)"
+    sleep $RETRY_INTERVAL
+done
+
+if [ $retry_count -eq $MAX_RETRIES ]; then
+    echo "❌ Debezium Connect 启动超时"
+    exit 1
+fi
+
+echo ""
 echo "注册 PostgreSQL CDC 连接器..."
 
 curl -i -X POST \

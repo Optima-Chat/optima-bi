@@ -133,7 +133,7 @@ bash scripts/verify.sh
 - `customer_stats_mv` - 客户分析统计
 - `merchant_overview_mv` - 商家总览（平台管理员）
 
-初始化脚本：[infrastructure/clickhouse/init/](./clickhouse/init/)
+初始化脚本：[infrastructure/clickhouse/init.sql](./clickhouse/init.sql)
 
 ---
 
@@ -364,8 +364,8 @@ bash infrastructure/debezium/register-connector.sh
 | `infrastructure/postgres/init.sql` | PostgreSQL 初始化（表结构 + 测试数据） |
 | `infrastructure/clickhouse/config.xml` | ClickHouse 服务配置 |
 | `infrastructure/clickhouse/users.xml` | ClickHouse 用户配置 |
-| `infrastructure/clickhouse/init/*.sql` | ClickHouse 表结构和物化视图 |
-| `infrastructure/debezium/register-connector.sh` | Debezium 连接器注册脚本 |
+| `infrastructure/clickhouse/init.sql` | ClickHouse 完整初始化脚本（表结构 + 物化视图） |
+| `infrastructure/debezium/register-connector.sh` | Debezium 连接器注册脚本（带健康检查） |
 | `scripts/start.sh` | 一键启动脚本 |
 | `scripts/verify.sh` | 数据同步验证脚本 |
 | `scripts/stop.sh` | 停止服务脚本 |
