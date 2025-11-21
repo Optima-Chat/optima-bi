@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { getDailySales } from '../services/clickhouse.service';
 import { getCached, setCached, acquireLock, releaseLock } from '../services/cache.service';
+import { requireMerchant } from '../middleware/auth.middleware';
 
 interface SalesQueryParams {
   days?: number;
@@ -12,12 +13,25 @@ export async function salesRoutes(fastify: FastifyInstance) {
   // GET /api/v1/sales - Get sales analytics
   fastify.get<{ Querystring: SalesQueryParams }>(
     '/api/v1/sales',
+    {
+      preHandler: requireMerchant(),
+    },
     async (request: FastifyRequest<{ Querystring: SalesQueryParams }>, reply: FastifyReply) => {
       const { days = 7 } = request.query;
 
-      // TODO: Get merchant_id from authenticated user (JWT token)
-      // For now, using a mock merchant_id
-      const merchantId = '11111111-1111-1111-1111-111111111111';
+      // Get merchant_id from authenticated user
+      const merchantId = request.user!.merchant_id;
+
+      // Validate merchant has merchant_id
+      if (!merchantId) {
+        return reply.code(403).send({
+          success: false,
+          error: {
+            code: 'NO_MERCHANT_ID',
+            message: 'User is not associated with a merchant',
+          },
+        });
+      }
 
       // Validate days parameter
       if (days < 1 || days > 365) {
